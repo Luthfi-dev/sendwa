@@ -1342,6 +1342,11 @@ app.post('/api/simulate', async (req, res) => {
 // 9. CONFIG, SESSIONS & MYSQL API
 // =============================================================
 
+// Public Health Check Endpoint for cPanel cron job / Uptime monitoring
+app.get('/api/health', (_req, res) => {
+  res.json({ success: true, status: 'online', timestamp: new Date().toISOString() });
+});
+
 app.get('/api/config', (_req, res) => {
   const sysConfig = getSystemConfig();
   const whitelabel = getWhitelabelConfig();
