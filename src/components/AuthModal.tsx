@@ -63,6 +63,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [login2faOtp, setLogin2faOtp] = useState('');
   const [isVerifying2fa, setIsVerifying2fa] = useState(false);
 
+  // Admin PIN Verification Login State
+  const [showPinVerifyPrompt, setShowPinVerifyPrompt] = useState(false);
+  const [userIdForPin, setUserIdForPin] = useState('');
+  const [loginPin, setLoginPin] = useState('');
+  const [isVerifyingPin, setIsVerifyingPin] = useState(false);
+
   // Status State
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -168,7 +174,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
 
       if (data.success) {
-        if (data.requires_2fa) {
+        if (data.requires_pin_verification) {
+          setShowPinVerifyPrompt(true);
+          setUserIdForPin(data.user_id);
+          setSuccessMsg(data.message || 'Verifikasi PIN Admin aktif!');
+        } else if (data.requires_2fa) {
           setShow2faPrompt(true);
           setUserIdFor2fa(data.user_id);
           setSuccessMsg(data.message || 'Verifikasi dua langkah aktif!');
@@ -188,6 +198,48 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setErrorMsg('Gagal terhubung ke server login. Silakan periksa jaringan Anda.');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleLoginPinSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+    setIsVerifyingPin(true);
+
+    let deviceId = localStorage.getItem('japriin_device_id');
+    if (!deviceId) {
+      deviceId = 'dev_' + Math.random().toString(36).substr(2, 9);
+      localStorage.setItem('japriin_device_id', deviceId);
+    }
+
+    try {
+      const res = await fetch('/api/auth/verify-login-pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: userIdForPin,
+          pin: loginPin.trim(),
+          device_id: deviceId
+        })
+      });
+      const data = await res.json();
+      if (data.success && data.user) {
+        setSuccessMsg('✓ Verifikasi PIN berhasil! Mengalihkan...');
+        setTimeout(() => {
+          onLoginSuccess(data.user);
+          onClose();
+          setShowPinVerifyPrompt(false);
+          setUserIdForPin('');
+          setLoginPin('');
+          setSuccessMsg('');
+        }, 1200);
+      } else {
+        setErrorMsg(data.error || 'PIN Keamanan salah.');
+      }
+    } catch (err) {
+      setErrorMsg('Gagal melakukan verifikasi PIN. Coba lagi.');
+    } finally {
+      setIsVerifyingPin(false);
     }
   };
 
@@ -557,7 +609,53 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         {/* ---------------- VIEW 1: LOGIN ---------------- */}
         {currentView === 'login' && (
-          show2faPrompt ? (
+          showPinVerifyPrompt ? (
+            <form onSubmit={handleLoginPinSubmit} className="space-y-4">
+              <div className="p-4 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/50 rounded-2xl text-center space-y-2">
+                <span className="text-2xl block">🔐</span>
+                <h4 className="text-xs font-black text-slate-800 dark:text-slate-200">Verifikasi Dua Langkah Admin (PIN)</h4>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                  Sistem mendeteksi login admin dari perangkat/browser baru. Masukkan PIN Keamanan Anda untuk masuk.
+                </p>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5 text-center">
+                  Masukkan PIN Keamanan Admin (4-8 Digit):
+                </label>
+                <input
+                  type="password"
+                  required
+                  maxLength={8}
+                  value={loginPin}
+                  onChange={e => setLoginPin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="------"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-sm font-black tracking-widest text-center text-slate-900 dark:text-white focus:border-emerald-500 focus:outline-none font-mono"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={isVerifyingPin || !loginPin}
+                className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs rounded-xl shadow-md transition-all disabled:opacity-50 min-h-[44px]"
+              >
+                {isVerifyingPin ? 'Memverifikasi PIN...' : 'Verifikasi PIN & Masuk'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPinVerifyPrompt(false);
+                  setLoginPin('');
+                  setErrorMsg('');
+                  setSuccessMsg('');
+                }}
+                className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs rounded-xl transition-all"
+              >
+                Kembali ke Form Login
+              </button>
+            </form>
+          ) : show2faPrompt ? (
             <form onSubmit={handleLogin2faSubmit} className="space-y-4">
               <div className="p-4 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/50 rounded-2xl text-center space-y-2">
                 <span className="text-2xl block">🔒</span>

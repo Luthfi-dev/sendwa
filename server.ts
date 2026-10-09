@@ -1745,8 +1745,26 @@ app.post('/api/auth/login', async (req, res) => {
     // 2-Step Verification for multi-device logins
     const incomingDevice = device_id || 'unknown_browser';
 
-    // If they have logged in before, and the device ID is different, require 2FA OTP
+    // If they have logged in before, and the device ID is different:
     if (user.last_login_device && user.last_login_device !== incomingDevice) {
+      // 1. Superadmin: No 2FA OTP needed at all!
+      if (user.id === 'usr_superadmin' || user.username?.toLowerCase() === 'superadmin') {
+        const updatedUser = updateUser(user.id, { last_login_device: incomingDevice });
+        const sanitizedUser = sanitizeUserForClient(updatedUser);
+        return res.json({ success: true, user: sanitizedUser, data: sanitizedUser });
+      }
+
+      // 2. Admin (non-superadmin admin): 2-step verification is via PIN!
+      if (user.role === 'admin') {
+        return res.json({
+          success: true,
+          requires_pin_verification: true,
+          user_id: user.id,
+          message: 'Verifikasi dua langkah Admin: Masukkan PIN Keamanan Anda untuk masuk.'
+        });
+      }
+
+      // 3. Regular users: WhatsApp OTP 2FA as before
       const loginOtp = generateOtpCode();
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
       updateUser(user.id, { verification_otp: loginOtp, otp_expires_at: expiresAt });
@@ -1771,6 +1789,23 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err: any) {
     console.error('Server login handler error:', err);
     res.status(500).json({ success: false, error: 'Terjadi kesalahan pada server saat memproses login.', details: err?.message });
+  }
+});
+
+app.post('/api/auth/verify-login-pin', (req, res) => {
+  const { user_id, pin, device_id } = req.body;
+  if (!user_id || !pin) {
+    return res.status(400).json({ success: false, error: 'User ID dan PIN wajib diisi.' });
+  }
+  const isValid = verifyUserSecurityPin(user_id, pin);
+  if (isValid) {
+    if (device_id) {
+      updateUser(user_id, { last_login_device: device_id });
+    }
+    const user = sanitizeUserForClient(getUserById(user_id));
+    res.json({ success: true, message: 'Verifikasi PIN berhasil!', user, data: user });
+  } else {
+    res.status(400).json({ success: false, error: 'PIN Keamanan salah. Silakan coba lagi.' });
   }
 });
 
