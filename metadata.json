@@ -1,0 +1,8 @@
+{
+  "name": "Japriin",
+  "description": "WhatsApp Business Cloud API Webhook, Auto-Reply Engine, and Real-time Monitoring Dashboard",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

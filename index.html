@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Japriin</title>
+    <meta name="description" content="WhatsApp Business Cloud API Webhook, Auto-Reply Engine, and Real-time Monitoring Dashboard" />
+    <meta name="keywords" content="whatsapp gateway, whatsapp api, auto reply whatsapp, bot wa ai, broadcast whatsapp, anti ban whatsapp, japriin" />
+    <meta name="robots" content="index, follow" />
+
+    <!-- OpenGraph Social Cards -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Japriin" />
+    <meta property="og:description" content="WhatsApp Business Cloud API Webhook, Auto-Reply Engine, and Real-time Monitoring Dashboard" />
+    <meta property="og:site_name" content="Japriin" />
+    <meta property="og:image" content="/src/assets/images/japriin_logo_1791445508697.jpg" />
+    <meta property="og:locale" content="id_ID" />
+
+    <!-- Twitter / X Cards -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Japriin – WhatsApp Business Gateway, AI Auto-Reply & Broadcast" />
+    <meta name="twitter:description" content="Platform WhatsApp Gateway &amp; AI Auto-Reply resmi tanpa watermark. Kirim broadcast pesan massal aman anti-ban, integrasi REST API, dan webhook otomatis." />
+    <meta name="twitter:image" content="/src/assets/images/japriin_logo_1791445508697.jpg" />
+
+    <!-- Schema.org JSON-LD Structured Data for Search Engines -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "Japriin",
+      "applicationCategory": "BusinessApplication",
+      "operatingSystem": "All",
+      "description": "Platform WhatsApp Gateway & AI Auto-Reply profesional tanpa watermark. Dilengkapi proteksi anti-ban, broadcast terjadwal, dan REST API interaktif.",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "IDR"
+      },
+      "featureList": [
+        "WhatsApp Multi-Device Gateway",
+        "Smart AI Auto-Reply Gemini",
+        "Anti-Ban Behavioral Protection",
+        "High-Concurrency Broadcast Engine",
+        "Interactive Developer REST API v1"
+      ]
+    }
+    </script>
+
+    <meta name="theme-color" content="#ffffff" id="theme-color-meta" />
+    <link rel="icon" type="image/jpeg" href="/src/assets/images/japriin_logo_1791445508697.jpg" />
+    <link rel="apple-touch-icon" href="/src/assets/images/japriin_logo_1791445508697.jpg" />
+  </head>
+  <body class="bg-slate-50 text-slate-900 antialiased selection:bg-emerald-500 selection:text-white font-sans transition-colors duration-200">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      // Cleanly unregister any legacy PWA service workers
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(registrations => {
+          for (const reg of registrations) {
+            reg.unregister();
+          }
+        });
+      }
+    </script>
+  </body>
+</html>
+
