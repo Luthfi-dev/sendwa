@@ -142,6 +142,13 @@ export async function initMysqlSchemaIfNotExists(): Promise<boolean> {
         max_sessions INT DEFAULT 1,
         daily_messages_sent INT DEFAULT 0,
         monthly_messages_sent INT DEFAULT 0,
+        security_pin VARCHAR(255),
+        verification_otp VARCHAR(16),
+        otp_expires_at VARCHAR(64),
+        custom_gemini_key TEXT,
+        custom_offline_message TEXT,
+        default_cs_reply_enabled BOOLEAN DEFAULT TRUE,
+        default_cs_reply_text TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_username (username),
         INDEX idx_email (email)
@@ -233,9 +240,9 @@ export async function pushUserToMysql(u: UserAccount): Promise<void> {
   try {
     const pool = getMysqlPool();
     await pool.query(`
-      INSERT INTO users (id, username, name, role, email, phone, is_active, email_verified, wa_verified, plan_id, plan_status, api_key, daily_messages_sent, monthly_messages_sent)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE name=VALUES(name), phone=VALUES(phone), plan_id=VALUES(plan_id), plan_status=VALUES(plan_status), api_key=VALUES(api_key), daily_messages_sent=VALUES(daily_messages_sent), monthly_messages_sent=VALUES(monthly_messages_sent)
+      INSERT INTO users (id, username, name, role, email, phone, password, is_active, email_verified, wa_verified, plan_id, plan_status, api_key, daily_messages_sent, monthly_messages_sent, security_pin, verification_otp, otp_expires_at, custom_gemini_key, custom_offline_message, default_cs_reply_enabled, default_cs_reply_text)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE name=VALUES(name), phone=VALUES(phone), password=VALUES(password), plan_id=VALUES(plan_id), plan_status=VALUES(plan_status), api_key=VALUES(api_key), daily_messages_sent=VALUES(daily_messages_sent), monthly_messages_sent=VALUES(monthly_messages_sent), security_pin=VALUES(security_pin), verification_otp=VALUES(verification_otp), otp_expires_at=VALUES(otp_expires_at), custom_gemini_key=VALUES(custom_gemini_key), custom_offline_message=VALUES(custom_offline_message), default_cs_reply_enabled=VALUES(default_cs_reply_enabled), default_cs_reply_text=VALUES(default_cs_reply_text)
     `, [
       u.id,
       u.username,
@@ -243,6 +250,7 @@ export async function pushUserToMysql(u: UserAccount): Promise<void> {
       u.role,
       u.email,
       u.phone || '',
+      u.password || '',
       Boolean(u.is_active),
       Boolean(u.email_verified),
       Boolean(u.wa_verified),
@@ -250,10 +258,17 @@ export async function pushUserToMysql(u: UserAccount): Promise<void> {
       u.plan_status,
       u.api_key || null,
       u.daily_messages_sent || 0,
-      u.monthly_messages_sent || 0
+      u.monthly_messages_sent || 0,
+      u.security_pin || null,
+      u.verification_otp || null,
+      u.otp_expires_at || null,
+      u.custom_gemini_key || null,
+      u.custom_offline_message || null,
+      u.default_cs_reply_enabled !== false ? 1 : 0,
+      u.default_cs_reply_text || null
     ]);
-  } catch {
-    // Non-blocking
+  } catch (err) {
+    console.error('[MySQL Push User Error]', err);
   }
 }
 
@@ -456,10 +471,20 @@ export async function syncPushStructureAndData(configOverride?: {
         is_active BOOLEAN DEFAULT TRUE,
         email_verified BOOLEAN DEFAULT FALSE,
         wa_verified BOOLEAN DEFAULT FALSE,
-        plan_id VARCHAR(32) DEFAULT 'starter',
-        plan_status VARCHAR(32) DEFAULT 'pending_approval',
+        plan_id VARCHAR(32) DEFAULT 'free',
+        plan_status VARCHAR(32) DEFAULT 'active',
         payment_note TEXT,
+        api_key VARCHAR(128),
         max_sessions INT DEFAULT 1,
+        daily_messages_sent INT DEFAULT 0,
+        monthly_messages_sent INT DEFAULT 0,
+        security_pin VARCHAR(255),
+        verification_otp VARCHAR(16),
+        otp_expires_at VARCHAR(64),
+        custom_gemini_key TEXT,
+        custom_offline_message TEXT,
+        default_cs_reply_enabled BOOLEAN DEFAULT TRUE,
+        default_cs_reply_text TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_username (username),
         INDEX idx_email (email)
@@ -536,10 +561,33 @@ export async function syncPushStructureAndData(configOverride?: {
     let userCount = 0;
     for (const u of db.users) {
       await connection.query(`
-        INSERT INTO users (id, username, name, role, email, phone, password, is_active, email_verified, wa_verified, plan_id, plan_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE name=VALUES(name), role=VALUES(role), plan_status=VALUES(plan_status)
-      `, [u.id, u.username, u.name, u.role, u.email, u.phone || '', u.password || '', u.is_active, u.email_verified, u.wa_verified, u.plan_id, u.plan_status]);
+        INSERT INTO users (id, username, name, role, email, phone, password, is_active, email_verified, wa_verified, plan_id, plan_status, api_key, daily_messages_sent, monthly_messages_sent, security_pin, verification_otp, otp_expires_at, custom_gemini_key, custom_offline_message, default_cs_reply_enabled, default_cs_reply_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE name=VALUES(name), phone=VALUES(phone), password=VALUES(password), role=VALUES(role), plan_status=VALUES(plan_status), api_key=VALUES(api_key), security_pin=VALUES(security_pin)
+      `, [
+        u.id,
+        u.username,
+        u.name,
+        u.role,
+        u.email,
+        u.phone || '',
+        u.password || '',
+        Boolean(u.is_active),
+        Boolean(u.email_verified),
+        Boolean(u.wa_verified),
+        u.plan_id,
+        u.plan_status,
+        u.api_key || null,
+        u.daily_messages_sent || 0,
+        u.monthly_messages_sent || 0,
+        u.security_pin || null,
+        u.verification_otp || null,
+        u.otp_expires_at || null,
+        u.custom_gemini_key || null,
+        u.custom_offline_message || null,
+        u.default_cs_reply_enabled !== false ? 1 : 0,
+        u.default_cs_reply_text || null
+      ]);
       userCount++;
     }
     recordsPushed['users'] = userCount;
