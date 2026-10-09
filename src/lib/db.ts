@@ -242,7 +242,7 @@ const DEFAULT_USERS: UserAccount[] = [
     role: 'admin',
     email: 'superadmin@japriin.com',
     phone: '081234567890',
-    password: 'superadmin_hash_placeholder',
+    password: hashPassword('superadmin'),
     is_active: true,
     email_verified: true,
     wa_verified: true,
@@ -265,7 +265,7 @@ const DEFAULT_USERS: UserAccount[] = [
     role: 'admin',
     email: 'admin@japriin.com',
     phone: '081298765432',
-    password: 'admin_hash_placeholder',
+    password: hashPassword('admin'),
     is_active: true,
     email_verified: true,
     wa_verified: true,
@@ -288,7 +288,7 @@ const DEFAULT_USERS: UserAccount[] = [
     role: 'user',
     email: 'user@japriin.com',
     phone: '085712345678',
-    password: 'user_hash_placeholder',
+    password: hashPassword('user'),
     is_active: true,
     email_verified: true,
     wa_verified: true,
@@ -311,7 +311,7 @@ const DEFAULT_USERS: UserAccount[] = [
     role: 'user',
     email: 'user_b@japriin.com',
     phone: '085261629099',
-    password: 'user_hash_placeholder',
+    password: hashPassword('user_b'),
     is_active: true,
     email_verified: true,
     wa_verified: true,
@@ -481,8 +481,13 @@ export function initDbFile(): LocalDatabase {
       parsed.users = DEFAULT_USERS;
     }
 
-    // Ensure users have pins, api_keys, and quota fields
+    // Ensure users have pins, api_keys, quota fields, and secure password hashes
     parsed.users.forEach((u: UserAccount) => {
+      if (!u.password || u.password.endsWith('_hash_placeholder') || u.password.length < 32) {
+        const defPw = u.username === 'superadmin' ? 'superadmin' : (u.username === 'admin' ? 'admin' : (u.username === 'user' ? 'user' : '123456'));
+        u.password = hashPassword(u.password && !u.password.endsWith('_hash_placeholder') && u.password.length > 0 ? u.password : defPw);
+        dbMigrated = true;
+      }
       if (!u.security_pin) u.security_pin = hashPin('123456');
       if (u.pin_failed_attempts === undefined) u.pin_failed_attempts = 0;
       if (u.is_bot_locked === undefined) u.is_bot_locked = false;
@@ -2139,7 +2144,7 @@ export function registerUser(data: {
     role: 'user',
     email: cleanEmail,
     phone: data.phone?.trim() || '',
-    password: data.password || '123456',
+    password: hashPassword(data.password || '123456'),
     is_active: false, // Inactive / Pending until WhatsApp verified
     email_verified: false,
     wa_verified: false,
@@ -2309,7 +2314,7 @@ export function resetPasswordWithOtp(identifier: string, otp: string, newPass: s
   if (!user) return false;
 
   if (user.verification_otp && user.verification_otp === otp.trim()) {
-    user.password = newPass;
+    user.password = hashPassword(newPass);
     user.verification_otp = undefined;
     user.otp_expires_at = undefined;
     writeDbFile(db);

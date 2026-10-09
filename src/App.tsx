@@ -257,7 +257,7 @@ export function App() {
       const [msgRes, statsRes, rulesRes, configRes, usersRes, sessionsRes, wlRes, plansRes, qrisRes] = await Promise.all([
         safeFetchJson(`/api/messages?userId=${uId}`, { success: true, data: [] }),
         safeFetchJson(`/api/stats?userId=${uId}`, { success: true, data: null }),
-        safeFetchJson('/api/rules', { success: true, data: [] }),
+        safeFetchJson(`/api/rules?userId=${uId}`, { success: true, data: [] }),
         safeFetchJson('/api/config', { success: true, data: null }),
         safeFetchJson('/api/users', { success: true, data: [] }),
         safeFetchJson(`/api/sessions?userId=${uId}`, { success: true, data: [] }),
@@ -310,6 +310,18 @@ export function App() {
 
       safeFetchJson('/api/whitelabel', { success: false })
         .then(res => { if (res.success && res.data) setWhitelabel(res.data); });
+
+      safeFetchJson('/api/users', { success: false })
+        .then(res => {
+          if (res.success && Array.isArray(res.data) && currentUser) {
+            const fresh = res.data.find((u: any) => u.id === currentUser.id);
+            if (fresh && JSON.stringify(fresh) !== JSON.stringify(currentUser)) {
+              setCurrentUser(fresh);
+              setCurrentRole(fresh.role);
+              localStorage.setItem('japriin_auth_user', JSON.stringify(fresh));
+            }
+          }
+        });
     }, 5000);
 
     return () => clearInterval(interval);
@@ -352,14 +364,17 @@ export function App() {
   // Add Auto Reply Rule
   const handleAddRule = async (newRuleData: Omit<AutoReplyRule, 'id' | 'created_at' | 'updated_at'>) => {
     try {
+      const uId = currentUserId || '';
       const res = await fetch('/api/rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newRuleData)
+        body: JSON.stringify({ ...newRuleData, user_id: uId })
       });
       const data = await res.json();
       if (data.success) {
         setRules(prev => [...prev, data.data]);
+      } else {
+        alert(data.error || 'Gagal menambahkan aturan.');
       }
     } catch (err) {
       console.error('Failed to add rule:', err);
@@ -369,7 +384,12 @@ export function App() {
   // Toggle Rule Status
   const handleToggleRule = async (id: string) => {
     try {
-      const res = await fetch(`/api/rules/${id}/toggle`, { method: 'PUT' });
+      const uId = currentUserId || '';
+      const res = await fetch(`/api/rules/${id}/toggle`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: uId })
+      });
       const data = await res.json();
       if (data.success) {
         setRules(prev => prev.map(r => r.id === id ? data.data : r));
@@ -382,7 +402,8 @@ export function App() {
   // Delete Rule
   const handleDeleteRule = async (id: string) => {
     try {
-      const res = await fetch(`/api/rules/${id}`, { method: 'DELETE' });
+      const uId = currentUserId || '';
+      const res = await fetch(`/api/rules/${id}?userId=${uId}`, { method: 'DELETE' });
       const data = await res.json();
       if (data.success) {
         setRules(prev => prev.filter(r => r.id !== id));

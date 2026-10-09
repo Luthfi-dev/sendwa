@@ -140,7 +140,7 @@
       "is_primary": false,
       "expires_at": "2027-01-06T00:06:06.373Z",
       "created_at": "2026-10-08T00:06:06.373Z",
-      "updated_at": "2026-10-09T10:43:54.455Z",
+      "updated_at": "2026-10-09T14:48:11.691Z",
       "connected_at": "2026-10-08T17:05:45.945Z"
     },
     {
@@ -148,15 +148,15 @@
       "session_name": "WA Pair - 6285761010112",
       "phone_number": "6285761010112",
       "auth_method": "pairing_code",
-      "status": "connected",
+      "status": "connecting",
       "user_id": "user_superadmin",
       "phone_number_id": "102938475610",
       "access_token": "TOKEN_WHATSAPP_SESSION_CONNECTED",
       "is_primary": true,
       "expires_at": "2026-11-07T00:34:27.277Z",
       "created_at": "2026-10-08T00:34:27.278Z",
-      "updated_at": "2026-10-09T10:43:53.288Z",
-      "connected_at": "2026-10-09T10:43:53.288Z"
+      "updated_at": "2026-10-09T14:57:31.029Z",
+      "connected_at": "2026-10-09T14:57:27.905Z"
     }
   ],
   "antiBan": {
@@ -195,7 +195,9 @@
       "monthly_ai_sent": 0,
       "last_quota_reset_date": "2026-10-08",
       "last_quota_reset_month": "2026-10",
-      "last_login_device": "dev_vuyu9c90c"
+      "last_login_device": "dev_vuyu9c90c",
+      "default_cs_reply_enabled": true,
+      "default_cs_reply_text": "Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin."
     },
     {
       "id": "user_admin",
@@ -220,7 +222,9 @@
       "daily_messages_sent": 0,
       "monthly_messages_sent": 0,
       "daily_ai_sent": 0,
-      "monthly_ai_sent": 0
+      "monthly_ai_sent": 0,
+      "default_cs_reply_enabled": true,
+      "default_cs_reply_text": "Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin."
     },
     {
       "id": "user_regular",
@@ -249,7 +253,9 @@
       "monthly_ai_sent": 0,
       "last_quota_reset_date": "2026-10-09",
       "last_quota_reset_month": "2026-10",
-      "last_login_device": "dev_vuyu9c90c"
+      "last_login_device": "dev_vuyu9c90c",
+      "default_cs_reply_enabled": true,
+      "default_cs_reply_text": "Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin."
     },
     {
       "id": "user_regular_b",
@@ -274,7 +280,9 @@
       "daily_messages_sent": 0,
       "monthly_messages_sent": 0,
       "daily_ai_sent": 0,
-      "monthly_ai_sent": 0
+      "monthly_ai_sent": 0,
+      "default_cs_reply_enabled": true,
+      "default_cs_reply_text": "Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin."
     },
     {
       "id": "usr_1791541815849_k65a",
@@ -300,7 +308,9 @@
       "created_at": "2026-10-09T10:30:15.849Z",
       "daily_ai_sent": 0,
       "monthly_ai_sent": 0,
-      "approved_at": "2026-10-09T11:18:01.536Z"
+      "approved_at": "2026-10-09T11:18:01.536Z",
+      "default_cs_reply_enabled": true,
+      "default_cs_reply_text": "Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin."
     }
   ],
   "smtpAccounts": [],
@@ -310,10 +320,11 @@
       "name": "K1",
       "key": "5e31dbef155fff915a6e9434380ae683:bd149700fe586aec68273380c8cc0310bdb76ba31eec62f07ca2df096617087b4b7319fd9c33ba02af1bbda6abcfcac6",
       "is_active": true,
-      "usage_count": 26,
-      "error_count": 0,
+      "usage_count": 29,
+      "error_count": 1,
       "created_at": "2026-10-07T17:25:45.671Z",
-      "last_used_at": "2026-10-07T18:26:10.861Z"
+      "last_used_at": "2026-10-09T14:44:07.467Z",
+      "last_error": "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."
     }
   ],
   "systemConfig": {
