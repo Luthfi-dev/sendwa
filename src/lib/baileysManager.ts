@@ -842,6 +842,7 @@ function attachSocketMessageListener(sock: any, sessionId: string, sessionData: 
                 senderName,
                 incomingText: messageText,
                 senderPhone,
+                userId: sessionUserId,
                 userCustomKey: userPersonalKey,
                 userCustomPrompt: userPersonalPrompt
               });

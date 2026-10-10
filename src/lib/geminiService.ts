@@ -1,5 +1,13 @@
-import { GoogleGenAI } from '@google/genai';
-import { getActiveGeminiKeys, getGeminiKeys, updateGeminiKey, getSystemConfig } from './db.js';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import {
+  getActiveGeminiKeys,
+  getGeminiKeys,
+  updateGeminiKey,
+  getSystemConfig,
+  getAutoReplyRules,
+  getMessageLogs,
+  getWhitelabelConfig
+} from './db.js';
 import { decryptData } from './security.js';
 
 export interface GeminiReplyResult {
@@ -12,6 +20,74 @@ export interface GeminiReplyResult {
 // Current high-performance Gemini models with low latency and high availability
 const FAST_MODELS = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
 
+interface ChatTurn {
+  role: 'user' | 'model';
+  text: string;
+  timestamp: number;
+}
+
+// In-memory multi-turn conversation context per sender so AI answers stay coherent ("nyambung")
+const conversationMemory = new Map<string, ChatTurn[]>();
+const MEMORY_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours conversation context
+const MAX_HISTORY_TURNS = 10;
+
+function getConversationHistory(memoryKey: string, senderPhone?: string, userId?: string): ChatTurn[] {
+  const now = Date.now();
+  const existing = (conversationMemory.get(memoryKey) || []).filter(
+    t => now - t.timestamp < MEMORY_TTL_MS && t.text.trim().length > 0
+  );
+
+  if (existing.length > 0) {
+    conversationMemory.set(memoryKey, existing);
+    return existing;
+  }
+
+  // Seed from recent message logs in DB if available
+  if (senderPhone) {
+    try {
+      const cleanPhone = senderPhone.replace(/\D/g, '');
+      const recentLogs = getMessageLogs(userId)
+        .filter(m => m.sender_phone && m.sender_phone.replace(/\D/g, '') === cleanPhone)
+        .slice(0, 5)
+        .reverse();
+
+      const seeded: ChatTurn[] = [];
+      for (const log of recentLogs) {
+        if (log.message_body && log.direction === 'incoming') {
+          seeded.push({ role: 'user', text: log.message_body, timestamp: now - 60000 });
+          if (
+            log.reply_body &&
+            !log.reply_body.includes('Tidak ada balasan') &&
+            !log.reply_body.includes('Tim Customer Service kami akan segera')
+          ) {
+            seeded.push({ role: 'model', text: log.reply_body, timestamp: now - 55000 });
+          }
+        }
+      }
+      if (seeded.length > 0) {
+        conversationMemory.set(memoryKey, seeded);
+        return seeded;
+      }
+    } catch {
+      // Ignore seed error
+    }
+  }
+
+  return [];
+}
+
+function appendConversationTurn(memoryKey: string, userText: string, modelReply: string) {
+  const now = Date.now();
+  const history = conversationMemory.get(memoryKey) || [];
+  history.push({ role: 'user', text: userText.trim(), timestamp: now });
+  history.push({ role: 'model', text: modelReply.trim(), timestamp: now });
+
+  if (history.length > MAX_HISTORY_TURNS * 2) {
+    history.splice(0, history.length - MAX_HISTORY_TURNS * 2);
+  }
+  conversationMemory.set(memoryKey, history);
+}
+
 /**
  * Normalizes raw Gemini error messages (e.g. JSON dumps) into concise human-readable strings
  */
@@ -23,7 +99,6 @@ function formatGeminiError(err: any): string {
   if (msg.includes('API_KEY_INVALID') || msg.includes('API key not valid')) {
     return 'API Key Gemini Tidak Valid';
   }
-  // Try to parse JSON if error message contains stringified JSON
   if (msg.includes('{') && msg.includes('}')) {
     try {
       const jsonStart = msg.indexOf('{');
@@ -40,29 +115,46 @@ function formatGeminiError(err: any): string {
 }
 
 /**
- * Generates an AI-powered auto-reply using Gemini with Multi-Key Rotation & Multi-Model Fallback.
+ * Extracts full text from GenerateContentResponse without truncation
+ */
+function extractFullResponseText(response: any): string {
+  const parts = response?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts) && parts.length > 0) {
+    const joined = parts
+      .filter((p: any) => typeof p?.text === 'string' && !p?.thought)
+      .map((p: any) => p.text)
+      .join('')
+      .trim();
+    if (joined) return joined;
+  }
+  return (response?.text || '').trim();
+}
+
+/**
+ * Generates an AI-powered auto-reply using Gemini with Multi-Key Rotation,
+ * Multi-Turn Conversation Memory, and Complete Uncut Responses.
  */
 export async function generateGeminiAutoReply(params: {
   senderName: string;
   incomingText: string;
   senderPhone?: string;
+  userId?: string;
   userCustomKey?: string;
-  userCustomPrompt?: string; // Custom system prompt for user
+  userCustomPrompt?: string;
 }): Promise<GeminiReplyResult> {
   const config = getSystemConfig();
-  if (!config.ai_config.enabled) {
+  if (!config.ai_config.enabled && !params.userCustomKey) {
     return { success: false, error: 'AI Auto-reply is disabled in settings.' };
   }
 
   const keysToTry: { name: string; key: string; id?: string }[] = [];
   const activeKeys = getActiveGeminiKeys();
 
-  // 1. If user provided their personal Gemini API Key, try it. 
-  // IMPORTANT: For personal keys, we DO NOT fall back to system keys to avoid drain.
+  // 1. If user provided their personal Gemini API Key, try it first
   if (params.userCustomKey && params.userCustomKey.length > 10) {
     keysToTry.push({ name: 'User Personal Key', key: params.userCustomKey });
   } else {
-    // 2. Load system active keys ONLY if no personal key is being used
+    // 2. Load system active keys
     for (const k of activeKeys) {
       const plain = decryptData(k.key);
       if (plain && plain.length > 10 && !keysToTry.some(item => item.key === plain)) {
@@ -75,7 +167,7 @@ export async function generateGeminiAutoReply(params: {
       const allKeys = getGeminiKeys();
       for (const k of allKeys) {
         const plain = decryptData(k.key);
-        if (plain && plain.length > 10) {
+        if (plain && plain.length > 10 && !keysToTry.some(item => item.key === plain)) {
           keysToTry.push({ name: k.name, key: plain, id: k.id });
         }
       }
@@ -90,17 +182,64 @@ export async function generateGeminiAutoReply(params: {
   if (keysToTry.length === 0) {
     return {
       success: false,
-      error: 'Belum ada API Key Gemini yang aktif. Silakan tambahkan Key Gemini pribadi Anda di tab Profil untuk mengaktifkan balasan otomatis AI.'
+      error:
+        'Belum ada API Key Gemini yang aktif. Silakan tambahkan Key Gemini pribadi Anda di tab Profil untuk mengaktifkan balasan otomatis AI.'
     };
   }
 
-  const systemPrompt = params.userCustomPrompt || config.ai_config.system_prompt ||
-    'Anda adalah asisten Customer Service bisnis yang ramah, sopan, ringkas, dan sangat membantu. Jawab pesan pelanggan WhatsApp secara profesional dan natural dalam Bahasa Indonesia. Hindari jawaban yang terlalu panjang atau bertele-tele.';
+  const wl = getWhitelabelConfig();
+  const brandName = wl?.app_name || 'Layanan Customer Service';
+  const baseSystemPrompt =
+    (params.userCustomPrompt && params.userCustomPrompt.trim()) ||
+    (config.ai_config.system_prompt && config.ai_config.system_prompt.trim()) ||
+    `Anda adalah asisten AI Customer Service resmi dari ${brandName} yang cerdas, ramah, sopan, dan solutif.`;
 
-  const promptContent = `Pelanggan: "${params.senderName}"
-Pesan masuk: "${params.incomingText}"
+  // Gather active FAQ / Auto-Reply Rules as reference knowledge so AI answers are grounded & relevant
+  const activeRules = getAutoReplyRules(params.userId).filter(r => r.is_active);
+  const faqContext =
+    activeRules.length > 0
+      ? `\n\nInformasi / FAQ Layanan yang Tersedia:\n` +
+        activeRules
+          .slice(0, 15)
+          .map(r => `- Jika ditanya tentang "${r.keyword}": ${r.response_text}`)
+          .join('\n')
+      : '';
 
-Tolong berikan balasan chat WhatsApp yang ramah, ringkas (maksimal 2-3 kalimat), menyapa nama pelanggan, dan menjawab atau mengarahkan dengan sopan.`;
+  const systemInstruction = `${baseSystemPrompt}${faqContext}
+
+Panduan Menjawab Chat WhatsApp:
+1. Jawab setiap pertanyaan pelanggan secara LENGKAP, TUNTAS, NYAMBUNG, dan JELAS dalam Bahasa Indonesia yang natural serta sopan. Jangan pernah memotong kalimat di tengah jalan.
+2. Jika pelanggan bertanya "kamu siapa" atau meminta perkenalan, perkenalkan diri Anda secara utuh sebagai asisten virtual / Customer Service yang siap membantu kebutuhan atau pertanyaan mereka.
+3. Jawab langsung ke inti pertanyaan pelanggan. Jika pelanggan menanyakan sesuatu yang umum atau meminta penjelasan, berikan jawaban yang informatif, terstruktur rapi, dan mudah dibaca di layar WhatsApp (gunakan paragraf pendek atau poin-poin bila perlu).
+4. Perhatikan konteks percakapan sebelumnya agar jawaban selalu nyambung. Jangan mengulang sapaan pembuka yang berlebihan jika percakapan sudah berlangsung.
+5. Nama lawan bicara Anda di WhatsApp adalah "${params.senderName || 'Kak'}".`;
+
+  const memoryKey = `${params.userId || 'global'}_${(params.senderPhone || params.senderName || 'anon').replace(/\D/g, '') || params.senderName}`;
+  const history = getConversationHistory(memoryKey, params.senderPhone, params.userId);
+
+  // Build multi-turn contents array for Gemini so it has full conversation context
+  const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+  for (const turn of history) {
+    // Ensure alternating roles required by Gemini API
+    if (contents.length === 0 && turn.role !== 'user') continue;
+    if (contents.length > 0 && contents[contents.length - 1].role === turn.role) {
+      contents[contents.length - 1].parts[0].text += `\n${turn.text}`;
+    } else {
+      contents.push({
+        role: turn.role,
+        parts: [{ text: turn.text }]
+      });
+    }
+  }
+
+  if (contents.length > 0 && contents[contents.length - 1].role === 'user') {
+    contents[contents.length - 1].parts[0].text += `\n${params.incomingText}`;
+  } else {
+    contents.push({
+      role: 'user',
+      parts: [{ text: params.incomingText }]
+    });
+  }
 
   let primaryModel = config.ai_config.model || 'gemini-3.8-flash';
   if (primaryModel.includes('2.5') || primaryModel.includes('2.0') || primaryModel.includes('1.5')) {
@@ -122,19 +261,24 @@ Tolong berikan balasan chat WhatsApp yang ramah, ringkas (maksimal 2-3 kalimat),
 
     for (const modelName of modelsToAttempt) {
       try {
+        const isGemini3 = modelName.startsWith('gemini-3');
         const response = await ai.models.generateContent({
           model: modelName,
-          contents: promptContent,
+          contents,
           config: {
-            systemInstruction: systemPrompt,
-            temperature: config.ai_config.temperature || 0.3,
-            maxOutputTokens: 250
+            systemInstruction,
+            temperature: config.ai_config.temperature ?? 0.4,
+            // Do NOT set a small maxOutputTokens (which includes thinking tokens and truncates output).
+            // Use LOW thinking level on Gemini 3 models so responses are fast and 100% complete.
+            ...(isGemini3 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {})
           }
         });
 
-        const replyText = response.text?.trim();
+        const replyText = extractFullResponseText(response);
 
         if (replyText) {
+          appendConversationTurn(memoryKey, params.incomingText, replyText);
+
           if (keyItem.id) {
             const current = activeKeys.find(k => k.id === keyItem.id);
             updateGeminiKey(keyItem.id, {
@@ -144,7 +288,9 @@ Tolong berikan balasan chat WhatsApp yang ramah, ringkas (maksimal 2-3 kalimat),
             });
           }
 
-          console.log(`[Gemini AI Reply] Generated via ${keyItem.name} (${modelName}): "${replyText.substring(0, 60)}..."`);
+          console.log(
+            `[Gemini AI Reply] Generated via ${keyItem.name} (${modelName}) [${replyText.length} chars]: "${replyText.substring(0, 80)}..."`
+          );
           return {
             success: true,
             reply_text: replyText,
@@ -155,10 +301,13 @@ Tolong berikan balasan chat WhatsApp yang ramah, ringkas (maksimal 2-3 kalimat),
         lastFormattedError = formatGeminiError(err);
         console.warn(`[Gemini Rotation] Model "${modelName}" on Key "${keyItem.name}" failed: ${lastFormattedError}`);
 
-        // If error is rate limit (429), immediately attempt next fallback model on same key
-        const isQuotaErr = err?.message?.includes('429') || err?.message?.includes('RESOURCE_EXHAUSTED');
-        if (!isQuotaErr) {
-          // Non-quota error (e.g. invalid key), break model loop to try next key
+        const errMsg = err?.message || '';
+        const isInvalidKey =
+          errMsg.includes('API_KEY_INVALID') ||
+          errMsg.includes('API key not valid') ||
+          errMsg.includes('PERMISSION_DENIED');
+        if (isInvalidKey) {
+          // Key itself is invalid; skip remaining models and try next key
           break;
         }
       }
@@ -199,16 +348,22 @@ export async function testGeminiApiKey(apiKey: string): Promise<{ success: boole
 
   for (const modelName of FAST_MODELS) {
     try {
+      const isGemini3 = modelName.startsWith('gemini-3');
       const res = await ai.models.generateContent({
         model: modelName,
         contents: 'Ping test. Balas hanya dengan kata: OK',
         config: {
-          temperature: 0.1
+          temperature: 0.1,
+          ...(isGemini3 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {})
         }
       });
 
-      if (res.text) {
-        return { success: true, message: `Koneksi AI Cerdas berhasil (${modelName})! Respon: ${res.text.trim()}` };
+      const text = extractFullResponseText(res);
+      if (text) {
+        return {
+          success: true,
+          message: `Koneksi AI Cerdas berhasil (${modelName})! Respon: ${text}`
+        };
       }
     } catch (err: any) {
       const formatted = formatGeminiError(err);
@@ -216,7 +371,10 @@ export async function testGeminiApiKey(apiKey: string): Promise<{ success: boole
     }
   }
 
-  return { success: false, message: 'Gagal menghubungkan API Key. Kuota habis (429) atau API Key tidak aktif.' };
+  return {
+    success: false,
+    message: 'Gagal menghubungkan API Key. Kuota habis (429) atau API Key tidak aktif.'
+  };
 }
 
 export interface ReceiptVerificationResult {
@@ -256,7 +414,6 @@ export async function verifyPaymentReceiptWithAi(params: {
     keysToTry.push({ name: 'System Default Key', key: process.env.GEMINI_API_KEY });
   }
 
-  // If no AI key available, perform fallback heuristic verification
   if (keysToTry.length === 0) {
     const hasNoteOrImage = Boolean(params.receiptBase64 || params.paymentNote);
     return {
@@ -308,7 +465,6 @@ Instruksi Analisis:
     const contents: any[] = [];
 
     if (params.receiptBase64) {
-      // Strip data:image/...;base64, prefix if exists
       let mimeType = 'image/jpeg';
       let pureBase64 = params.receiptBase64;
       if (params.receiptBase64.includes(';base64,')) {
@@ -338,7 +494,7 @@ Instruksi Analisis:
           }
         });
 
-        const rawJson = response.text?.trim() || '';
+        const rawJson = extractFullResponseText(response);
         console.log(`[AI Receipt Verification Result from ${keyItem.name} (${modelName})]:`, rawJson);
 
         const parsed = JSON.parse(rawJson);
@@ -361,7 +517,6 @@ Instruksi Analisis:
     }
   }
 
-  // Fallback if network or model call failed
   return {
     isValid: true,
     confidence: 'medium',

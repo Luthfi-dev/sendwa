@@ -86,8 +86,9 @@ export async function handleIncomingWhatsAppMessage(params: {
   messageText: string;
   wamId?: string;
   userId?: string;
+  skipSend?: boolean;
 }): Promise<WhatsAppMessageLog> {
-  const { senderPhone, senderName, messageText, wamId, userId } = params;
+  const { senderPhone, senderName, messageText, wamId, userId, skipSend } = params;
   const cleanName = senderName || 'Pelanggan';
   const cleanText = messageText.trim();
   const textLower = cleanText.toLowerCase();
@@ -125,10 +126,17 @@ export async function handleIncomingWhatsAppMessage(params: {
   if (!matchedResponse && isAiAllowed) {
     try {
       console.log(`[AI Fallback] No rule matched for "${cleanText}", querying Gemini...`);
+      const userPersonalKey =
+        user?.custom_gemini_key && user.custom_gemini_key.length > 10
+          ? decryptData(user.custom_gemini_key)
+          : undefined;
       const aiResult = await generateGeminiAutoReply({
         senderName: cleanName,
         incomingText: cleanText,
-        senderPhone
+        senderPhone,
+        userId,
+        userCustomKey: userPersonalKey || undefined,
+        userCustomPrompt: user?.custom_system_prompt || undefined
       });
 
       if (aiResult.success && aiResult.reply_text) {
@@ -152,8 +160,12 @@ export async function handleIncomingWhatsAppMessage(params: {
     .replace(/{nama}/g, cleanName)
     .replace(/{pesan}/g, cleanText);
 
-  // 5. Send message via Meta Graph API if token is configured
-  const sendResult = finalReplyText ? await sendWhatsAppMessage(senderPhone, finalReplyText) : { success: true, wam_id: undefined, error: undefined };
+  // 5. Send message via Meta Graph API / Baileys unless skipSend is true (e.g. UI AI test simulator)
+  const isSimDummy = senderPhone === '628999000111' || Boolean(skipSend);
+  const sendResult =
+    finalReplyText && !isSimDummy
+      ? await sendWhatsAppMessage(senderPhone, finalReplyText)
+      : { success: true, wam_id: undefined, error: undefined };
 
   // Status calculation
   const isSuccess = sendResult.success;
