@@ -4,11 +4,11 @@ import { MysqlConnectionStatus } from '../types/whatsapp';
 
 export const SqlSchemaViewer: React.FC = () => {
   // Cloud DB Credentials State
-  const [host, setHost] = useState('localhost');
+  const [host, setHost] = useState('15.235.193.207');
   const [port, setPort] = useState(3306);
-  const [user, setUser] = useState('root');
+  const [user, setUser] = useState('maudigic_baru');
   const [password, setPassword] = useState('');
-  const [database, setDatabase] = useState('japriin_wa_gateway');
+  const [database, setDatabase] = useState('maudigic_whatsappsend');
 
   // Connection & Sync Status
   const [connectionStatus, setConnectionStatus] = useState<MysqlConnectionStatus | null>(null);
@@ -228,7 +228,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_messages (
                 </span>
               </div>
               <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                Data harian otomatis aman tersimpan di penyimpanan lokal sistem agar cepat dan anti-lelet. Hubungkan Database Cloud pusat untuk kebutuhan backup dan sinkronisasi multi-server secara instan.
+                Seluruh data pengguna, sesi WhatsApp, aturan bot, SMTP, dan konfigurasi tersimpan 100% secara real-time langsung ke Database MySQL Online tanpa file penyimpanan lokal (database.json).
               </p>
             </div>
           </div>

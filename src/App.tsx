@@ -26,7 +26,8 @@ import {
   Key,
   Send,
   Code,
-  ShieldAlert
+  ShieldAlert,
+  Mail
 } from 'lucide-react';
 
 import {
@@ -59,11 +60,24 @@ import { SecurityPinModal } from './components/SecurityPinModal';
 import { BroadcastPanel } from './components/BroadcastPanel';
 import { ProfilePanel } from './components/ProfilePanel';
 
+function normalizeUserClient(u: any, prev?: UserAccount | null): UserAccount {
+  const emVer = Boolean(u?.email_verified === true || u?.email_verified === 1 || u?.email_verified === '1' || u?.email_verified === 'true' || prev?.email_verified);
+  const actVer = Boolean(u?.is_active === true || u?.is_active === 1 || u?.is_active === '1' || u?.is_active === 'true' || prev?.is_active);
+  const isVerified = emVer || actVer || u?.role === 'admin';
+  return {
+    ...u,
+    wa_verified: true,
+    email_verified: isVerified,
+    is_active: isVerified,
+    plan_status: isVerified && (u?.plan_id === 'free' || !u?.plan_id || u?.plan_status === 'pending_approval') ? 'active' : (u?.plan_status || 'active')
+  };
+}
+
 export function App() {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
     try {
       const saved = localStorage.getItem('japriin_auth_user');
-      return saved ? JSON.parse(saved) : null;
+      return saved ? normalizeUserClient(JSON.parse(saved)) : null;
     } catch {
       return null;
     }
@@ -100,9 +114,10 @@ export function App() {
               if (res.success && Array.isArray(res.data)) {
                 const fresh = res.data.find((u: UserAccount) => u.id === parsed.id);
                 if (fresh) {
-                  setCurrentUser(fresh);
-                  setCurrentRole(fresh.role);
-                  localStorage.setItem('japriin_auth_user', JSON.stringify(fresh));
+                  const normalized = normalizeUserClient(fresh, parsed);
+                  setCurrentUser(normalized);
+                  setCurrentRole(normalized.role);
+                  localStorage.setItem('japriin_auth_user', JSON.stringify(normalized));
                 }
               }
             })
@@ -117,13 +132,14 @@ export function App() {
   const [isMobileMoreOpen, setIsMobileMoreOpen] = useState<boolean>(false);
   const [mobileSubMenuOpen, setMobileSubMenuOpen] = useState<boolean>(false);
 
-  // Pending WhatsApp Verification States for logged-in sessions
+  // Pending Email Verification States for logged-in sessions
   const [waPendingOtp, setWaPendingOtp] = useState('');
+  const [pendingVerifyMethod, setPendingVerifyMethod] = useState<'whatsapp' | 'email'>('email');
   const [isVerifyingWaPending, setIsVerifyingWaPending] = useState(false);
   const [waPendingError, setWaPendingError] = useState('');
   const [waPendingSuccess, setWaPendingSuccess] = useState('');
   const [isResendingWaPending, setIsResendingWaPending] = useState(false);
-  const [waPendingCooldown, setWaPendingCooldown] = useState<number>(30);
+  const [waPendingCooldown, setWaPendingCooldown] = useState<number>(0);
 
   // Timer hitungan mundur 30 detik untuk kirim ulang OTP WhatsApp pending
   useEffect(() => {
@@ -280,9 +296,10 @@ export function App() {
           const fresh = usersRes.data.find((u: UserAccount) => u.id === currentUserId);
           if (fresh) {
             setCurrentUser(prev => {
-              if (!prev || prev.plan_id !== fresh.plan_id || prev.is_active !== fresh.is_active || prev.max_sessions !== fresh.max_sessions || prev.phone !== fresh.phone) {
-                localStorage.setItem('japriin_auth_user', JSON.stringify(fresh));
-                return fresh;
+              const normalized = normalizeUserClient(fresh, prev);
+              if (!prev || JSON.stringify(prev) !== JSON.stringify(normalized)) {
+                localStorage.setItem('japriin_auth_user', JSON.stringify(normalized));
+                return normalized;
               }
               return prev;
             });
@@ -315,10 +332,16 @@ export function App() {
         .then(res => {
           if (res.success && Array.isArray(res.data) && currentUser) {
             const fresh = res.data.find((u: any) => u.id === currentUser.id);
-            if (fresh && JSON.stringify(fresh) !== JSON.stringify(currentUser)) {
-              setCurrentUser(fresh);
+            if (fresh) {
+              setCurrentUser(prev => {
+                const normalized = normalizeUserClient(fresh, prev);
+                if (!prev || JSON.stringify(normalized) !== JSON.stringify(prev)) {
+                  localStorage.setItem('japriin_auth_user', JSON.stringify(normalized));
+                  return normalized;
+                }
+                return prev;
+              });
               setCurrentRole(fresh.role);
-              localStorage.setItem('japriin_auth_user', JSON.stringify(fresh));
             }
           }
         });
@@ -334,11 +357,12 @@ export function App() {
   };
 
   const handleLoginSuccess = (user: UserAccount) => {
-    setCurrentUser(user);
-    setCurrentRole(user.role);
+    const normalized = normalizeUserClient(user);
+    setCurrentUser(normalized);
+    setCurrentRole(normalized.role);
     setViewMode('app');
     setIsAuthOpen(false);
-    localStorage.setItem('japriin_auth_user', JSON.stringify(user));
+    localStorage.setItem('japriin_auth_user', JSON.stringify(normalized));
   };
 
   const handleLogout = () => {
@@ -431,15 +455,16 @@ export function App() {
         body: JSON.stringify({
           user_id: currentUser.id,
           otp: waPendingOtp.trim(),
-          type: 'whatsapp'
+          type: pendingVerifyMethod
         })
       });
       const data = await res.json();
       if (data.success && data.user) {
-        setWaPendingSuccess('✓ Verifikasi WhatsApp berhasil! Akun Anda aktif.');
-        setCurrentUser(data.user);
-        setCurrentRole(data.user.role);
-        localStorage.setItem('japriin_auth_user', JSON.stringify(data.user));
+        const normalized = normalizeUserClient(data.user, currentUser);
+        setWaPendingSuccess(`✓ Verifikasi ${pendingVerifyMethod === 'whatsapp' ? 'WhatsApp' : 'Email'} berhasil! Akun Anda aktif.`);
+        setCurrentUser(normalized);
+        setCurrentRole(normalized.role);
+        localStorage.setItem('japriin_auth_user', JSON.stringify(normalized));
         setWaPendingOtp('');
         fetchData();
       } else {
@@ -452,26 +477,27 @@ export function App() {
     }
   };
 
-  const handleResendPendingWa = async () => {
-    if (!currentUser || waPendingCooldown > 0 || isResendingWaPending) return;
+  const handleResendPendingWa = async (methodOverride?: 'whatsapp' | 'email') => {
+    const targetMethod = methodOverride || pendingVerifyMethod;
+    if (!currentUser || ( !methodOverride && waPendingCooldown > 0 ) || isResendingWaPending) return;
     setIsResendingWaPending(true);
     setWaPendingError('');
     setWaPendingSuccess('');
-    setWaPendingCooldown(30);
 
     try {
-      const res = await fetch('/api/auth/resend-otp', {
+      const endpoint = targetMethod === 'email' ? '/api/user/send-email-otp' : '/api/auth/resend-otp';
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           user_id: currentUser.id,
-          method: 'whatsapp'
+          method: targetMethod
         })
       });
       const data = await res.json().catch(() => null);
       if (data && data.success) {
-        setWaPendingSuccess(data.message || 'Kode OTP baru berhasil dikirim ke nomor WhatsApp Anda.');
-        if (data.cooldown_seconds) setWaPendingCooldown(data.cooldown_seconds);
+        setWaPendingSuccess(data.message || `Kode OTP baru berhasil dikirim ke ${targetMethod === 'email' ? 'Email' : 'WhatsApp'} Anda.`);
+        setWaPendingCooldown(data.cooldown_seconds || 30);
       } else if (data && data.cooldown_seconds) {
         setWaPendingCooldown(data.cooldown_seconds);
         setWaPendingError(data.error);
@@ -675,22 +701,22 @@ export function App() {
 
       {/* Main Container */}
       <main className="max-w-7xl mx-auto px-3.5 sm:px-6 lg:px-8 py-5 sm:py-6 pb-28 lg:pb-8">
-        {/* CHECK IF USER IS PENDING WHATSAPP VERIFICATION (Non-Admin) */}
-        {currentUser && currentUser.role !== 'admin' && (!currentUser.wa_verified || !currentUser.is_active) ? (
+        {/* CHECK IF USER IS UNVERIFIED (Email is not verified yet) */}
+        {currentUser && currentUser.role !== 'admin' && !currentUser.is_active && !currentUser.email_verified ? (
           <div className="bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-500/40 rounded-3xl p-6 sm:p-8 max-w-xl mx-auto text-center shadow-xl space-y-5 my-6">
             <div className="w-16 h-16 rounded-3xl bg-emerald-50 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-500/30 mx-auto flex items-center justify-center">
-              <Smartphone className="w-8 h-8" />
+              <Mail className="w-8 h-8" />
             </div>
 
             <div className="space-y-1.5">
               <span className="px-3 py-1 bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-500/30 rounded-full text-[11px] font-black uppercase">
-                Status Akun: Pending
+                Verifikasi Email Diperlukan
               </span>
               <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">
-                Verifikasi Nomor WhatsApp untuk Mengaktifkan Akun
+                Verifikasi Kode OTP Email Anda
               </h2>
               <p className="text-xs text-slate-600 dark:text-slate-300 max-w-md mx-auto leading-relaxed">
-                Halo <strong>{currentUser.name}</strong> (@{currentUser.username}), akun Anda masih berstatus <strong>Pending</strong>. Masukkan kode OTP rahasia 6 digit yang telah dikirimkan ke nomor WhatsApp <strong>{currentUser.phone || 'Anda'}</strong> untuk mulai menggunakan gateway.
+                Halo <strong>{currentUser.name}</strong> (@{currentUser.username}), silakan masukkan 6 digit kode OTP yang dikirim ke alamat email <strong>{currentUser.email || '-'}</strong> agar akun Anda langsung aktif dan dapat menggunakan seluruh fitur Dashboard.
               </p>
             </div>
 
@@ -724,13 +750,13 @@ export function App() {
                 disabled={isVerifyingWaPending || waPendingOtp.length < 4}
                 className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs rounded-xl shadow-md transition-all disabled:opacity-50 min-h-[44px]"
               >
-                {isVerifyingWaPending ? 'Memverifikasi...' : 'Verifikasi & Aktifkan Akun Sekarang'}
+                {isVerifyingWaPending ? 'Memverifikasi...' : 'Verifikasi OTP Email & Aktifkan Akun'}
               </button>
 
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-2">
                 <button
                   type="button"
-                  onClick={handleResendPendingWa}
+                  onClick={() => handleResendPendingWa('email')}
                   disabled={isResendingWaPending || waPendingCooldown > 0}
                   className={`py-2.5 px-4 font-bold text-xs rounded-xl border transition-all ${
                     waPendingCooldown > 0
@@ -742,7 +768,7 @@ export function App() {
                     ? `Kirim Ulang (${waPendingCooldown}s)`
                     : isResendingWaPending
                     ? 'Mengirim...'
-                    : 'Kirim Ulang OTP ke WhatsApp'}
+                    : 'Kirim Ulang OTP ke Email'}
                 </button>
 
                 <button
@@ -755,7 +781,7 @@ export function App() {
               </div>
             </form>
           </div>
-        ) : currentUser && currentUser.role !== 'admin' && currentUser.plan_status === 'pending_approval' ? (
+        ) : currentUser && currentUser.role !== 'admin' && currentUser.plan_status === 'pending_approval' && currentUser.plan_id !== 'free' ? (
           <div className="bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-500/40 rounded-3xl p-6 sm:p-8 max-w-2xl mx-auto text-center shadow-xl space-y-5 my-6">
             <div className="w-16 h-16 rounded-3xl bg-amber-50 dark:bg-amber-500/20 text-amber-500 border border-amber-300 dark:border-amber-500/30 mx-auto flex items-center justify-center animate-pulse">
               <Clock className="w-8 h-8" />

@@ -78,7 +78,9 @@ import {
   getBaileysSessionStatus,
   stopBaileysSession,
   sendBaileysTextMessage,
-  normalizePhoneNumber
+  normalizePhoneNumber,
+  restoreSavedBaileysSessions,
+  getPreferredSystemBaileysSessionId
 } from './src/lib/baileysManager.js';
 import {
   sendEmailWithRotation,
@@ -93,7 +95,9 @@ import {
 import {
   testMysqlConnection,
   syncPushStructureAndData,
-  initMysqlSchemaIfNotExists
+  initMysqlSchemaIfNotExists,
+  pushUserToMysql,
+  fetchDatabaseFromMysql
 } from './src/lib/mysqlService.js';
 import {
   maskSensitiveString,
@@ -112,6 +116,9 @@ app.disable('x-powered-by');
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 function getSystemWhatsAppSessionId() {
+  const preferred = getPreferredSystemBaileysSessionId();
+  if (preferred) return preferred;
+
   const sessions = getWhatsAppSessions();
   let session = sessions.find(s => s.status === 'connected' && (s.user_id === 'usr_superadmin' || s.id?.includes('superadmin')));
   if (!session) {
@@ -124,17 +131,52 @@ function getSystemWhatsAppSessionId() {
 }
 
 async function sendSystemWhatsAppNotification(phone: string, text: string) {
-  const sessionId = getSystemWhatsAppSessionId();
-  if (sessionId) {
-    try {
-      await sendBaileysTextMessage(sessionId, phone, text, { skipLog: true, skipQuota: true });
-      console.log(`[System WA] Notification sent to ${phone} via session ${sessionId}`);
-      return true;
-    } catch (err: any) {
-      console.error(`[System WA Error] Failed to send message to ${phone}:`, err?.message);
+  let sessionId = getSystemWhatsAppSessionId();
+  if (!sessionId) {
+    const sessions = getWhatsAppSessions();
+    const superSess = sessions.find(s => s.user_id === 'usr_superadmin' || s.id?.includes('superadmin'));
+    if (superSess) {
+      sessionId = superSess.id;
+    } else if (sessions.length > 0) {
+      sessionId = sessions[0].id;
+    } else {
+      sessionId = 'session_primary_default';
     }
-  } else {
-    console.warn(`[System WA Warning] No connected system/superadmin WhatsApp session found. Cannot send message to ${phone}.`);
+  }
+
+  try {
+    // Ensure session is started & connected in memory
+    await getOrStartBaileysSession(sessionId, undefined, 'usr_superadmin').catch(() => {});
+    
+    // Wait up to 8 seconds for connection status to become active if connecting
+    let waited = 0;
+    while (waited < 16) {
+      const status = getBaileysSessionStatus(sessionId);
+      if (status && status.status === 'connected') {
+        break;
+      }
+      await new Promise(r => setTimeout(r, 500));
+      waited++;
+    }
+
+    await sendBaileysTextMessage(sessionId, phone, text, { skipLog: true, skipQuota: true });
+    console.log(`[System WA] Notification sent to ${phone} via session ${sessionId}`);
+    return true;
+  } catch (err: any) {
+    console.error(`[System WA Error] Failed to send message to ${phone} via session ${sessionId}:`, err?.message);
+
+    // Fallback attempt with any other available preferred session
+    const altSessionId = getPreferredSystemBaileysSessionId();
+    if (altSessionId && altSessionId !== sessionId) {
+      try {
+        await getOrStartBaileysSession(altSessionId, undefined, 'usr_superadmin').catch(() => {});
+        await sendBaileysTextMessage(altSessionId, phone, text, { skipLog: true, skipQuota: true });
+        console.log(`[System WA Fallback] Notification sent to ${phone} via ${altSessionId}`);
+        return true;
+      } catch (fallbackErr: any) {
+        console.error(`[System WA Fallback Error]`, fallbackErr?.message);
+      }
+    }
   }
   return false;
 }
@@ -142,8 +184,18 @@ async function sendSystemWhatsAppNotification(phone: string, text: string) {
 function sanitizeUserForClient(user: any) {
   if (!user) return user;
   const copy = { ...user };
+  const hasPendingOtp = Boolean(copy.verification_otp && String(copy.verification_otp).trim().length > 0);
   delete copy.verification_otp;
   delete copy.password;
+  const emVer = Boolean(copy.email_verified === true || copy.email_verified === 1 || copy.email_verified === '1' || copy.email_verified === 'true');
+  const actVer = Boolean(copy.is_active === true || copy.is_active === 1 || copy.is_active === '1' || copy.is_active === 'true');
+  const isVerified = emVer || actVer || !hasPendingOtp || copy.role === 'admin';
+  copy.email_verified = isVerified;
+  copy.wa_verified = true;
+  copy.is_active = isVerified;
+  if (isVerified && (copy.plan_id === 'free' || !copy.plan_id || copy.plan_status === 'pending_approval')) {
+    copy.plan_status = 'active';
+  }
   return copy;
 }
 
@@ -887,28 +939,6 @@ app.post('/api/user/default-cs-reply', (req, res) => {
   });
 });
 
-app.post('/api/user/default-cs-reply', (req, res) => {
-  const { user_id, enabled, text } = req.body;
-  if (!user_id) return res.status(400).json({ success: false, error: 'User ID wajib diisi.' });
-
-  const user = getUserById(user_id);
-  if (!user) return res.status(404).json({ success: false, error: 'Pengguna tidak ditemukan.' });
-
-  const updates: any = {};
-  if (typeof enabled === 'boolean') updates.default_cs_reply_enabled = enabled;
-  if (typeof text === 'string') {
-    updates.default_cs_reply_text = text.trim();
-    updates.custom_offline_message = text.trim();
-  }
-
-  const updated = updateUser(user_id, updates);
-  res.json({
-    success: true,
-    message: 'Pengaturan pesan balas otomatis CS berhasil disimpan!',
-    user: sanitizeUserForClient(updated)
-  });
-});
-
 app.post('/api/user/allowed-numbers', (req, res) => {
   const { user_id, allowed_numbers } = req.body;
   if (!user_id) return res.status(400).json({ success: false, error: 'User ID wajib diisi.' });
@@ -1342,8 +1372,9 @@ app.post('/api/simulate', async (req, res) => {
 // 9. CONFIG, SESSIONS & MYSQL API
 // =============================================================
 
-// Public Health Check Endpoint for cPanel cron job / Uptime monitoring
+// Public Health Check Endpoint for cPanel cron job / Uptime monitoring (also keeps Baileys sessions awake)
 app.get('/api/health', (_req, res) => {
+  restoreSavedBaileysSessions().catch(() => {});
   res.json({ success: true, status: 'online', timestamp: new Date().toISOString() });
 });
 
@@ -1471,9 +1502,11 @@ app.put('/api/sessions/:id', (req, res) => {
   res.json({ success: true, data: updated });
 });
 
-app.delete('/api/sessions/:id', (req, res) => {
-  const deleted = deleteWhatsAppSession(req.params.id);
-  res.json({ success: deleted });
+app.delete('/api/sessions/:id', async (req, res) => {
+  const sessionId = req.params.id;
+  const deleted = deleteWhatsAppSession(sessionId);
+  await stopBaileysSession(sessionId).catch(() => {});
+  res.json({ success: true, deleted });
 });
 
 // Test & Broadcast Message Dispatch Route
@@ -1641,19 +1674,18 @@ app.post('/api/auth/check-availability', (req, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    if (!req.body?.phone || String(req.body.phone).replace(/\D/g, '').length < 8) {
-      return res.status(400).json({ error: 'Nomor WhatsApp aktif wajib diisi (minimal 8 digit) untuk menerima kode verifikasi OTP.' });
+    if (!req.body?.email || !String(req.body.email).includes('@')) {
+      return res.status(400).json({ error: 'Alamat Email aktif wajib diisi untuk menerima kode OTP aktivasi akun.' });
     }
 
     const { user, otp } = registerUser(req.body);
-    const wl = getWhitelabelConfig();
+    await pushUserToMysql(user);
 
-    // Kirim OTP verifikasi ke WhatsApp user menggunakan sesi sistem/superadmin (Rahasia, tidak dicatat di halaman)
-    let waSent = false;
-    if (user.phone) {
-      const msg = `Halo *${user.name}*! 👋\n\nTerima kasih telah mendaftar di *${wl.app_name || 'Japriin'}*. Kode OTP rahasia verifikasi nomor WhatsApp Anda adalah:\n\n*${otp}*\n\nJangan bagikan kode ini kepada siapa pun. Masukkan kode ini di halaman verifikasi untuk mengaktifkan akun Anda.`;
-      waSent = await sendSystemWhatsAppNotification(user.phone, msg);
-    }
+    // Kirim OTP verifikasi langsung ke Email user agar akun bisa langsung diaktifkan dengan mudah
+    const emailRes = await sendVerificationOtpEmail(user.email, user.name || user.username, otp).catch((e: any) => ({
+      success: false,
+      error: e?.message
+    }));
 
     const cleanUser = sanitizeUserForClient(user);
     res.json({
@@ -1661,8 +1693,9 @@ app.post('/api/auth/register', async (req, res) => {
       user: cleanUser,
       data: cleanUser,
       user_id: user.id,
-      wa_sent: waSent,
-      message: 'Pendaftaran berhasil! Kode OTP rahasia 6 digit telah dikirimkan ke nomor WhatsApp Anda.'
+      email: user.email,
+      email_sent: emailRes.success,
+      message: `Pendaftaran berhasil! Kode OTP 6 digit telah dikirim ke email ${user.email}. Masukkan kode OTP untuk langsung mengaktifkan akun Anda.`
     });
   } catch (e: any) {
     res.status(400).json({ error: e?.message || 'Gagal mendaftar pengguna baru.' });
@@ -1714,82 +1747,55 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    // Check WhatsApp verification:
-    // "Akun aktif jika sudah verifikasi no WhatsApp jika belum maka pending jika pending belum bisa login dan gunakan harus verifikasi nomor WhatsApp dulu"
-    if (user.role !== 'admin' && (!user.wa_verified || !user.is_active)) {
+    // Check Email verification (only if user has a pending OTP and is not active yet):
+    const hasPendingOtp = Boolean(user.verification_otp && String(user.verification_otp).trim().length > 0);
+    const isUserVerified = Boolean(user.email_verified) || Boolean(user.is_active) || !hasPendingOtp || user.role === 'admin';
+    if (!isUserVerified) {
       let pendingOtp = user.verification_otp;
       const now = Date.now();
       const isExpired = !user.otp_expires_at || new Date(user.otp_expires_at).getTime() < now;
-      const cooldownCheck = checkOtpCooldown(`login_wa_${user.id}`, 30);
+      const cooldownCheck = checkOtpCooldown(`login_email_${user.id}`, 30);
 
       if (!pendingOtp || isExpired || cooldownCheck.allowed) {
         pendingOtp = generateOtpCode();
         const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-        updateUser(user.id, { verification_otp: pendingOtp, otp_expires_at: expiresAt });
+        const updatedPending = updateUser(user.id, { verification_otp: pendingOtp, otp_expires_at: expiresAt });
+        if (updatedPending) {
+          await pushUserToMysql(updatedPending);
+        }
 
-        if (user.phone) {
-          const wl = getWhitelabelConfig();
-          const msg = `Halo *${user.name}*! 👋\n\nAkun Anda masih berstatus *Pending* menunggu verifikasi nomor WhatsApp.\nKode OTP rahasia verifikasi Anda adalah:\n\n*${pendingOtp}*\n\nSilakan masukkan kode ini di aplikasi untuk mengaktifkan akun Anda.`;
-          // Kirim di background tanpa memblokir respon HTTP (mencegah timeout "server gagal terhubung")
-          sendSystemWhatsAppNotification(user.phone, msg).catch(err => {
-            console.error('[Send Pending Login WA Error]', err);
+        if (user.email) {
+          sendVerificationOtpEmail(user.email, user.name || user.username, pendingOtp).catch(err => {
+            console.error('[Send Pending Login Email OTP Error]', err);
           });
         }
       }
 
       return res.status(200).json({
         success: false,
+        requires_email_verification: true,
         requires_wa_verification: true,
         user_id: user.id,
         phone: user.phone,
-        message: 'Status akun Anda masih Pending karena nomor WhatsApp belum diverifikasi. Kode OTP telah dikirim ke nomor WhatsApp Anda.',
-        error: 'Status akun Anda masih Pending karena nomor WhatsApp belum diverifikasi. Silakan masukkan kode OTP yang telah dikirimkan ke WhatsApp Anda untuk mengaktifkan akun.'
+        email: user.email,
+        message: `Akun Anda belum aktif. Kami telah mengirimkan 6 digit kode OTP ke alamat email ${user.email}. Masukkan kode tersebut untuk langsung mengaktifkan akun.`,
+        error: `Akun Anda belum aktif. Silakan masukkan kode OTP yang dikirim ke email ${user.email}.`
       });
     }
 
-    // 2-Step Verification for multi-device logins
-    const incomingDevice = device_id || 'unknown_browser';
-
-    // If they have logged in before, and the device ID is different:
-    if (user.last_login_device && user.last_login_device !== incomingDevice) {
-      // 1. Superadmin: No 2FA OTP needed at all!
-      if (user.id === 'usr_superadmin' || user.username?.toLowerCase() === 'superadmin') {
-        const updatedUser = updateUser(user.id, { last_login_device: incomingDevice });
-        const sanitizedUser = sanitizeUserForClient(updatedUser);
-        return res.json({ success: true, user: sanitizedUser, data: sanitizedUser });
-      }
-
-      // 2. Admin (non-superadmin admin): 2-step verification is via PIN!
-      if (user.role === 'admin') {
-        return res.json({
-          success: true,
-          requires_pin_verification: true,
-          user_id: user.id,
-          message: 'Verifikasi dua langkah Admin: Masukkan PIN Keamanan Anda untuk masuk.'
-        });
-      }
-
-      // 3. Regular users: WhatsApp OTP 2FA as before
-      const loginOtp = generateOtpCode();
-      const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-      updateUser(user.id, { verification_otp: loginOtp, otp_expires_at: expiresAt });
-
-      if (user.phone) {
-        const msg = `🔒 *KEAMANAN JAPRIIN: VERIFIKASI DUA LANGKAH*\n\nKami mendeteksi upaya masuk ke akun Japriin Anda (*${user.username}*) dari perangkat/browser baru.\n\nKode verifikasi keamanan login Anda adalah:\n\n*${loginOtp}*\n\nSilakan masukkan kode ini di layar browser Anda untuk menyelesaikan login.`;
-        await sendSystemWhatsAppNotification(user.phone, msg);
-      }
-
-      return res.json({
-        success: true,
-        requires_2fa: true,
-        user_id: user.id,
-        message: 'Keamanan Verifikasi Dua Langkah aktif! Kami telah mengirimkan kode verifikasi login ke nomor WhatsApp Anda.'
-      });
+    // Ensure verified user is marked active & email_verified in Online MySQL DB and log them straight in
+    const incomingDevice = device_id || 'trusted_browser';
+    const updatedUser = updateUser(user.id, {
+      is_active: true,
+      email_verified: true,
+      wa_verified: true,
+      plan_status: user.plan_id === 'free' || !user.plan_id ? 'active' : user.plan_status || 'active',
+      last_login_device: incomingDevice
+    });
+    if (updatedUser) {
+      await pushUserToMysql(updatedUser);
     }
-
-    // Otherwise, login is directly successful, record current device ID
-    const updatedUser = updateUser(user.id, { last_login_device: incomingDevice });
-    const sanitizedUser = sanitizeUserForClient(updatedUser);
+    const sanitizedUser = sanitizeUserForClient(updatedUser || user);
     res.json({ success: true, user: sanitizedUser, data: sanitizedUser });
   } catch (err: any) {
     console.error('Server login handler error:', err);
@@ -1814,15 +1820,19 @@ app.post('/api/auth/verify-login-pin', (req, res) => {
   }
 });
 
-app.post('/api/auth/verify-otp', (req, res) => {
+app.post('/api/auth/verify-otp', async (req, res) => {
   const { user_id, otp, type, device_id } = req.body;
-  const success = verifyUserOtp(user_id, otp, type || 'whatsapp');
+  const success = verifyUserOtp(user_id, otp, type || 'email');
   if (success) {
     if (device_id) {
       updateUser(user_id, { last_login_device: device_id });
     }
-    const user = sanitizeUserForClient(getUserById(user_id));
-    res.json({ success: true, message: 'Verifikasi berhasil!', user, data: user });
+    const updatedUser = getUserById(user_id);
+    if (updatedUser) {
+      await pushUserToMysql(updatedUser);
+    }
+    const user = sanitizeUserForClient(updatedUser);
+    res.json({ success: true, message: 'Verifikasi email berhasil! Akun Anda langsung aktif.', user, data: user });
   } else {
     res.status(400).json({ error: 'Kode OTP tidak cocok atau sudah kadaluarsa.' });
   }
@@ -1833,7 +1843,7 @@ app.post('/api/auth/resend-otp', async (req, res) => {
   const user = getUserById(user_id);
   if (!user) return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
 
-  const targetMethod = method === 'email' ? 'email' : 'whatsapp';
+  const targetMethod = method === 'whatsapp' ? 'whatsapp' : 'email';
   const cooldownKey = `resend_${user.id}_${targetMethod}`;
   const cooldownCheck = checkOtpCooldown(cooldownKey, 30);
   if (!cooldownCheck.allowed) {
@@ -1847,10 +1857,13 @@ app.post('/api/auth/resend-otp', async (req, res) => {
   const newOtp = generateOtpCode();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
   const updated = updateUser(user_id, { verification_otp: newOtp, otp_expires_at: expiresAt });
+  if (updated) {
+    await pushUserToMysql(updated);
+  }
   const wl = getWhitelabelConfig();
 
   if (targetMethod === 'email') {
-    const emailRes = await sendVerificationOtpEmail(user.email, user.username, newOtp).catch((e: any) => ({
+    const emailRes = await sendVerificationOtpEmail(user.email, user.name || user.username, newOtp).catch((e: any) => ({
       success: false,
       error: e?.message
     }));
@@ -1860,7 +1873,7 @@ app.post('/api/auth/resend-otp', async (req, res) => {
     return res.json({
       success: true,
       cooldown_seconds: 30,
-      message: 'Kode OTP rahasia baru telah dikirimkan ke alamat email Anda.',
+      message: `Kode OTP 6 digit baru telah dikirimkan ke alamat email ${user.email}.`,
       user: sanitizeUserForClient(updated)
     });
   }
@@ -2172,10 +2185,16 @@ async function startServer() {
     console.log(`🤖 Remote Assistant WhatsApp Bot Ready`);
     console.log(`====================================================`);
 
-    // Asynchronously verify & initialize Online Database Cloud MySQL schema
-    initMysqlSchemaIfNotExists().catch(err => {
-      console.warn('[Online DB] Inisialisasi latar belakang:', err?.message);
-    });
+    // Initialize Online Database Cloud MySQL schema & hydrate data first, then restore Baileys sessions once
+    initMysqlSchemaIfNotExists()
+      .catch(err => {
+        console.warn('[Online DB] Inisialisasi latar belakang:', err?.message);
+      })
+      .finally(() => {
+        restoreSavedBaileysSessions().catch(err => {
+          console.warn('[Baileys Auto-Restore] Peringatan:', err?.message);
+        });
+      });
   });
 }
 

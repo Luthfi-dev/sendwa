@@ -38,11 +38,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Verification & Forgot Password State
   const [userIdForVerification, setUserIdForVerification] = useState<string>('');
   const [verificationPhone, setVerificationPhone] = useState<string>('');
+  const [verificationEmail, setVerificationEmail] = useState<string>('');
   const [otpCode, setOtpCode] = useState<string>('');
-  const [verificationType, setVerificationType] = useState<'email' | 'whatsapp'>('whatsapp');
+  const [verificationType, setVerificationType] = useState<'email' | 'whatsapp'>('email');
   const [otpCooldown, setOtpCooldown] = useState<number>(0);
 
-  // Real-time Availability State
+  // Availability State (checked only after user stops typing)
   const [availability, setAvailability] = useState<{
     usernameAvailable?: boolean;
     emailAvailable?: boolean;
@@ -51,7 +52,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     emailMessage?: string;
     phoneMessage?: string;
   }>({});
-  const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
+  const [isCheckingUsername, setIsCheckingUsername] = useState(false);
+  const [isCheckingEmail, setIsCheckingEmail] = useState(false);
+  const [isCheckingPhone, setIsCheckingPhone] = useState(false);
 
   const [forgotIdentifier, setForgotIdentifier] = useState('');
   const [forgotMethod, setForgotMethod] = useState<'whatsapp' | 'email'>('whatsapp');
@@ -89,47 +92,98 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setSelectedPlanId('free');
     setErrorMsg('');
     setSuccessMsg('');
+    setAvailability({});
   }, [mode, isOpen]);
 
-  // Real-time debounced availability check
-  React.useEffect(() => {
-    if (currentView !== 'register') return;
-    if (!username.trim() && !email.trim() && !phone.trim()) {
-      setAvailability({});
-      return;
-    }
+  const checkSingleFieldAvailability = React.useCallback(
+    async (field: 'username' | 'email' | 'phone', rawValue: string) => {
+      const val = rawValue.trim();
+      if (!val) return;
 
-    const timer = setTimeout(async () => {
-      setIsCheckingAvailability(true);
+      if (field === 'username') {
+        if (val.length < 3) return;
+        setIsCheckingUsername(true);
+      } else if (field === 'email') {
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(val)) return;
+        setIsCheckingEmail(true);
+      } else if (field === 'phone') {
+        if (val.replace(/\D/g, '').length < 9) return;
+        setIsCheckingPhone(true);
+      }
+
       try {
         const res = await fetch('/api/auth/check-availability', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            username: username.trim() || undefined,
-            email: email.trim() || undefined,
-            phone: phone.trim() || undefined
-          })
+          body: JSON.stringify({ [field]: val })
         });
         const data = await res.json();
         if (data.success) {
-          setAvailability({
-            usernameAvailable: data.usernameAvailable,
-            emailAvailable: data.emailAvailable,
-            phoneAvailable: data.phoneAvailable,
-            usernameMessage: data.usernameMessage,
-            emailMessage: data.emailMessage,
-            phoneMessage: data.phoneMessage
-          });
+          setAvailability(prev => ({
+            ...prev,
+            ...(field === 'username'
+              ? { usernameAvailable: data.usernameAvailable, usernameMessage: data.usernameMessage }
+              : {}),
+            ...(field === 'email'
+              ? { emailAvailable: data.emailAvailable, emailMessage: data.emailMessage }
+              : {}),
+            ...(field === 'phone'
+              ? { phoneAvailable: data.phoneAvailable, phoneMessage: data.phoneMessage }
+              : {})
+          }));
         }
       } catch {
+        // Ignore network check error
       } finally {
-        setIsCheckingAvailability(false);
+        if (field === 'username') setIsCheckingUsername(false);
+        if (field === 'email') setIsCheckingEmail(false);
+        if (field === 'phone') setIsCheckingPhone(false);
       }
-    }, 350);
+    },
+    []
+  );
 
+  // Check Username ONLY after user stops typing for 1000ms
+  React.useEffect(() => {
+    if (currentView !== 'register') return;
+    const clean = username.trim();
+    if (clean.length < 3) {
+      setIsCheckingUsername(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      checkSingleFieldAvailability('username', clean);
+    }, 1000);
     return () => clearTimeout(timer);
-  }, [username, email, phone, currentView]);
+  }, [username, currentView, checkSingleFieldAvailability]);
+
+  // Check Email ONLY after user stops typing for 1000ms and email format is complete
+  React.useEffect(() => {
+    if (currentView !== 'register') return;
+    const clean = email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(clean)) {
+      setIsCheckingEmail(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      checkSingleFieldAvailability('email', clean);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [email, currentView, checkSingleFieldAvailability]);
+
+  // Check Phone ONLY after user stops typing for 1000ms
+  React.useEffect(() => {
+    if (currentView !== 'register') return;
+    const clean = phone.trim();
+    if (clean.replace(/\D/g, '').length < 9) {
+      setIsCheckingPhone(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      checkSingleFieldAvailability('phone', clean);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [phone, currentView, checkSingleFieldAvailability]);
 
   if (!isOpen) return null;
 
@@ -159,15 +213,19 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         return;
       }
 
-      // If account is pending because WhatsApp is not yet verified:
+      // If account is pending because Email is not yet verified:
       // Redirect directly to verify OTP view and start 30 seconds countdown
-      if (data.requires_wa_verification) {
+      if (data.requires_email_verification || data.requires_wa_verification) {
         setUserIdForVerification(data.user_id);
+        setVerificationEmail(data.email || '');
         setVerificationPhone(data.phone || '');
-        setVerificationType('whatsapp');
+        setVerificationType('email');
         setOtpCode('');
         setErrorMsg('');
-        setSuccessMsg(data.message || 'Akun Anda masih berstatus Pending. Silakan masukkan kode OTP yang telah dikirim ke nomor WhatsApp Anda.');
+        setSuccessMsg(
+          data.message ||
+            `Akun Anda belum aktif. Silakan masukkan 6 digit kode OTP yang telah dikirim ke email ${data.email || 'Anda'} untuk langsung mengaktifkan akun.`
+        );
         setCurrentView('verify_otp');
         setOtpCooldown(30);
         return;
@@ -311,32 +369,34 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
     try {
       const regPhone = phone.trim();
+      const regEmail = email.trim();
       const res = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           username: username.trim(),
           name: name.trim(),
-          email: email.trim(),
+          email: regEmail,
           phone: regPhone,
           password,
           plan_id: 'free',
-          payment_note: 'Pending - Menunggu Verifikasi Nomor WhatsApp'
+          payment_note: 'Menunggu Verifikasi Email OTP'
         })
       });
       const data = await res.json();
 
       if (data.success) {
         setUserIdForVerification(data.user_id || data.data?.id);
+        setVerificationEmail(data.email || regEmail);
         setVerificationPhone(regPhone);
-        setVerificationType('whatsapp');
+        setVerificationType('email');
         setOtpCode('');
         setSuccessMsg(
           data.message ||
-            `Pendaftaran berhasil! Kode OTP rahasia 6 digit telah dikirimkan ke nomor WhatsApp ${regPhone}. Silakan masukkan kode OTP untuk mengaktifkan akun Anda.`
+            `Pendaftaran berhasil! Kode OTP 6 digit telah dikirimkan ke alamat email ${regEmail}. Masukkan kode OTP untuk langsung mengaktifkan akun Anda.`
         );
 
-        // CLEAR FORM SETELAH SELESAI DAFTAR (User Request: "saat daftar buat clear form setelah selesai")
+        // CLEAR FORM SETELAH SELESAI DAFTAR
         setName('');
         setUsername('');
         setEmail('');
@@ -365,6 +425,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setSuccessMsg('');
     setIsSubmitting(true);
 
+    let deviceId = localStorage.getItem('japriin_device_id');
+    if (!deviceId) {
+      deviceId = 'dev_' + Math.random().toString(36).substr(2, 9);
+      localStorage.setItem('japriin_device_id', deviceId);
+    }
+
     try {
       const res = await fetch('/api/auth/verify-otp', {
         method: 'POST',
@@ -372,13 +438,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         body: JSON.stringify({
           user_id: userIdForVerification,
           otp: otpCode.trim(),
-          type: verificationType
+          type: 'email',
+          device_id: deviceId
         })
       });
       const data = await res.json();
 
       if (data.success) {
-        setSuccessMsg(`✓ Verifikasi ${verificationType === 'whatsapp' ? 'Nomor WhatsApp' : 'Email'} Berhasil! Akun Anda kini aktif.`);
+        setSuccessMsg('✓ Verifikasi Email Berhasil! Akun Anda langsung aktif. Mengalihkan ke Dashboard...');
         const userObj = data.user || data.data;
 
         // Clear OTP & inputs
@@ -392,7 +459,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setTimeout(() => {
           if (userObj) onLoginSuccess(userObj);
           onClose();
-        }, 1200);
+        }, 400);
       } else {
         setErrorMsg(data.error || 'Kode OTP tidak cocok atau sudah kadaluarsa.');
       }
@@ -403,7 +470,35 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  // Resend OTP with 30s Cooldown Countdown
+  // Send Email Verification OTP during registration verification
+  const handleSendEmailOtp = async (bypassLocalCooldown = false) => {
+    if ((!bypassLocalCooldown && otpCooldown > 0) || isSubmitting) return;
+    setErrorMsg('');
+    setSuccessMsg('Mengirim kode OTP ke alamat Email Anda...');
+    setIsSubmitting(true);
+
+    try {
+      const res = await fetch('/api/user/send-email-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userIdForVerification })
+      });
+      const data = await res.json().catch(() => null);
+      if (data && data.success) {
+        setSuccessMsg(data.message || 'Kode OTP verifikasi email berhasil dikirim! Silakan cek kotak masuk atau folder spam email Anda.');
+        setOtpCooldown(data.cooldown_seconds || 30);
+      } else {
+        if (data?.cooldown_seconds) setOtpCooldown(data.cooldown_seconds);
+        setErrorMsg(data?.error || 'Gagal mengirim email verifikasi.');
+      }
+    } catch (err) {
+      setErrorMsg('Gagal terhubung ke server pengiriman email.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Resend WhatsApp OTP
   const handleResendOtp = async () => {
     if (otpCooldown > 0 || isSubmitting) return;
     setErrorMsg('');
@@ -417,18 +512,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           user_id: userIdForVerification,
-          method: verificationType
+          method: 'whatsapp'
         })
       });
       const data = await res.json().catch(() => null);
       if (data && data.success) {
-        setSuccessMsg(data.message || 'Kode OTP baru berhasil dikirimkan!');
+        setSuccessMsg(data.message || 'Kode OTP WhatsApp baru berhasil dikirimkan!');
         if (data.cooldown_seconds) setOtpCooldown(data.cooldown_seconds);
       } else if (data && data.cooldown_seconds) {
         setOtpCooldown(data.cooldown_seconds);
         setErrorMsg(data.error);
       } else {
-        setErrorMsg(data?.error || 'Gagal mengirim ulang OTP.');
+        setErrorMsg(data?.error || 'Gagal mengirim ulang OTP WhatsApp.');
       }
     } catch (e) {
       setErrorMsg('Koneksi gagal saat mengirim ulang OTP.');
@@ -536,15 +631,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <h2 className="text-lg sm:text-xl font-black text-slate-900 dark:text-white leading-tight pr-8">
                 {currentView === 'login' && `Masuk Portal ${whitelabel?.app_name || 'Japriin'}`}
                 {currentView === 'register' && 'Daftar Akun Otomatis (Paket Gratis)'}
-                {currentView === 'verify_otp' && 'Verifikasi Nomor WhatsApp'}
+                {currentView === 'verify_otp' && 'Verifikasi Email & Aktifkan Akun'}
                 {currentView === 'forgot_password_step1' && 'Lupa / Ganti Password Akun'}
                 {currentView === 'forgot_password_step2' && 'Atur Password Baru'}
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
                 {currentView === 'login' && 'Masukkan username dan password Anda untuk mengakses portal.'}
-                {currentView === 'register' && 'Akun langsung aktif di Paket Gratis (100 pesan/hari). Verifikasi via WhatsApp.'}
-                {currentView === 'verify_otp' && 'Masukkan 6 digit kode OTP rahasia yang dikirim ke nomor WhatsApp Anda.'}
-                {currentView === 'forgot_password_step1' && 'Verifikasi default menggunakan WhatsApp, atau opsi kedua via Email (jika email sudah diverifikasi).'}
+                {currentView === 'register' && 'Akun langsung aktif di Paket Gratis (100 pesan/hari). Cukup verifikasi kode OTP via Email.'}
+                {currentView === 'verify_otp' && 'Masukkan 6 digit kode OTP yang dikirim ke Email Anda untuk langsung mengaktifkan akun.'}
+                {currentView === 'forgot_password_step1' && 'Pilih metode pengiriman OTP untuk mengatur ulang password akun Anda.'}
                 {currentView === 'forgot_password_step2' && 'Ketik kode verifikasi 6 digit rahasia dan buat password baru.'}
               </p>
             </div>
@@ -784,7 +879,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </span>
               </div>
               <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
-                Pendaftaran baru langsung aktif di <strong>Paket Gratis</strong> (100 pesan/hari &amp; 500 pesan/bulan), <strong>100% tanpa watermark</strong>. Verifikasi pendaftaran menggunakan <strong>Nomor WhatsApp</strong> (verifikasi Email dapat dilakukan setelah login di menu Profil).
+                Pendaftaran baru langsung aktif di <strong>Paket Gratis</strong> (100 pesan/hari &amp; 500 pesan/bulan), <strong>100% tanpa watermark</strong>. Cukup verifikasi <strong>Kode OTP Email</strong> sekali saja untuk langsung masuk ke Dashboard.
               </p>
             </div>
 
@@ -804,10 +899,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">Username Login</label>
-                  {isCheckingAvailability && username && (
+                  {isCheckingUsername && username && (
                     <span className="text-[10px] text-slate-400 flex items-center gap-1 font-medium">
                       <RefreshCw className="w-2.5 h-2.5 animate-spin" />
-                      <span>Cek...</span>
+                      <span>Mengecek...</span>
                     </span>
                   )}
                 </div>
@@ -815,7 +910,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   type="text"
                   required
                   value={username}
-                  onChange={e => setUsername(e.target.value.toLowerCase().replace(/\s+/g, ''))}
+                  onChange={e => {
+                    const val = e.target.value.toLowerCase().replace(/\s+/g, '');
+                    setUsername(val);
+                    setIsCheckingUsername(false);
+                    setAvailability(prev => ({
+                      ...prev,
+                      usernameAvailable: undefined,
+                      usernameMessage: undefined
+                    }));
+                  }}
+                  onBlur={() => {
+                    if (username.trim().length >= 3 && availability.usernameAvailable === undefined && !isCheckingUsername) {
+                      checkSingleFieldAvailability('username', username);
+                    }
+                  }}
                   placeholder="Contoh: tokoberkah"
                   className={`w-full bg-slate-50 dark:bg-slate-950 border rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-white focus:outline-none font-mono transition-colors ${
                     username && availability.usernameAvailable === false
@@ -825,13 +934,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       : 'border-slate-200 dark:border-slate-800 focus:border-emerald-500'
                   }`}
                 />
-                {username && availability.usernameAvailable === true && (
+                {username && !isCheckingUsername && availability.usernameAvailable === true && (
                   <span className="text-[10px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1 mt-1 font-bold">
                     <CheckCircle2 className="w-3 h-3" />
                     <span>✓ Username tersedia</span>
                   </span>
                 )}
-                {username && availability.usernameAvailable === false && (
+                {username && !isCheckingUsername && availability.usernameAvailable === false && (
                   <span className="text-[10px] text-rose-600 dark:text-rose-400 flex items-center gap-1 mt-1 font-bold">
                     <AlertCircle className="w-3 h-3 shrink-0" />
                     <span>{availability.usernameMessage || 'Username sudah digunakan'}</span>
@@ -843,11 +952,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">No. WhatsApp Aktif (Wajib OTP)</label>
-                  {isCheckingAvailability && phone && (
+                  <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">No. WhatsApp Aktif</label>
+                  {isCheckingPhone && phone && (
                     <span className="text-[10px] text-slate-400 flex items-center gap-1 font-medium">
                       <RefreshCw className="w-2.5 h-2.5 animate-spin" />
-                      <span>Cek...</span>
+                      <span>Mengecek...</span>
                     </span>
                   )}
                 </div>
@@ -855,7 +964,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   type="text"
                   required
                   value={phone}
-                  onChange={e => setPhone(e.target.value)}
+                  onChange={e => {
+                    setPhone(e.target.value);
+                    setIsCheckingPhone(false);
+                    setAvailability(prev => ({
+                      ...prev,
+                      phoneAvailable: undefined,
+                      phoneMessage: undefined
+                    }));
+                  }}
+                  onBlur={() => {
+                    if (phone.replace(/\D/g, '').length >= 9 && availability.phoneAvailable === undefined && !isCheckingPhone) {
+                      checkSingleFieldAvailability('phone', phone);
+                    }
+                  }}
                   placeholder="08123456789"
                   className={`w-full bg-slate-50 dark:bg-slate-950 border rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-white focus:outline-none font-mono transition-colors ${
                     phone && availability.phoneAvailable === false
@@ -865,13 +987,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       : 'border-slate-200 dark:border-slate-800 focus:border-emerald-500'
                   }`}
                 />
-                {phone && availability.phoneAvailable === true && (
+                {phone && !isCheckingPhone && availability.phoneAvailable === true && (
                   <span className="text-[10px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1 mt-1 font-bold">
                     <CheckCircle2 className="w-3 h-3" />
                     <span>✓ Nomor WhatsApp tersedia</span>
                   </span>
                 )}
-                {phone && availability.phoneAvailable === false && (
+                {phone && !isCheckingPhone && availability.phoneAvailable === false && (
                   <span className="text-[10px] text-rose-600 dark:text-rose-400 flex items-center gap-1 mt-1 font-bold">
                     <AlertCircle className="w-3 h-3 shrink-0" />
                     <span>{availability.phoneMessage || 'Nomor WhatsApp sudah terdaftar'}</span>
@@ -881,11 +1003,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">Email (Verif di Profil)</label>
-                  {isCheckingAvailability && email && (
+                  <label className="text-[11px] font-bold text-slate-700 dark:text-slate-300">Email Aktif (Wajib OTP)</label>
+                  {isCheckingEmail && email && (
                     <span className="text-[10px] text-slate-400 flex items-center gap-1 font-medium">
                       <RefreshCw className="w-2.5 h-2.5 animate-spin" />
-                      <span>Cek...</span>
+                      <span>Mengecek...</span>
                     </span>
                   )}
                 </div>
@@ -893,7 +1015,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   type="email"
                   required
                   value={email}
-                  onChange={e => setEmail(e.target.value)}
+                  onChange={e => {
+                    setEmail(e.target.value);
+                    setIsCheckingEmail(false);
+                    setAvailability(prev => ({
+                      ...prev,
+                      emailAvailable: undefined,
+                      emailMessage: undefined
+                    }));
+                  }}
+                  onBlur={() => {
+                    if (/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim()) && availability.emailAvailable === undefined && !isCheckingEmail) {
+                      checkSingleFieldAvailability('email', email);
+                    }
+                  }}
                   placeholder="email@gmail.com"
                   className={`w-full bg-slate-50 dark:bg-slate-950 border rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-white focus:outline-none transition-colors ${
                     email && availability.emailAvailable === false
@@ -903,13 +1038,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       : 'border-slate-200 dark:border-slate-800 focus:border-emerald-500'
                   }`}
                 />
-                {email && availability.emailAvailable === true && (
+                {email && !isCheckingEmail && availability.emailAvailable === true && (
                   <span className="text-[10px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1 mt-1 font-bold">
                     <CheckCircle2 className="w-3 h-3" />
                     <span>✓ Email tersedia</span>
                   </span>
                 )}
-                {email && availability.emailAvailable === false && (
+                {email && !isCheckingEmail && availability.emailAvailable === false && (
                   <span className="text-[10px] text-rose-600 dark:text-rose-400 flex items-center gap-1 mt-1 font-bold">
                     <AlertCircle className="w-3 h-3 shrink-0" />
                     <span>{availability.emailMessage || 'Email sudah terdaftar'}</span>
@@ -935,7 +1070,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               disabled={isSubmitting || availability.usernameAvailable === false || availability.emailAvailable === false || availability.phoneAvailable === false}
               className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs rounded-xl shadow-md transition-all disabled:opacity-50 min-h-[44px]"
             >
-              {isSubmitting ? 'Mendaftarkan Akun...' : 'Daftar & Kirim OTP ke WhatsApp (Rp 0)'}
+              {isSubmitting ? 'Mendaftarkan Akun...' : 'Daftar & Kirim OTP ke Email (Rp 0)'}
             </button>
 
             <div className="text-center pt-2">
@@ -951,22 +1086,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </form>
         )}
 
-        {/* ---------------- VIEW 3: VERIFY OTP (WHATSAPP ONLY AT REGISTRATION) ---------------- */}
+        {/* ---------------- VIEW 3: VERIFY OTP (EMAIL ONLY) ---------------- */}
         {currentView === 'verify_otp' && (
           <form onSubmit={handleVerifyOtp} className="space-y-4">
             <div className="p-4 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 rounded-2xl text-xs space-y-2">
               <div className="flex items-center gap-2 font-black text-emerald-900 dark:text-emerald-200">
-                <Smartphone className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                <span>Verifikasi Nomor WhatsApp ({verificationPhone || phone || 'Terdaftar'})</span>
+                <Mail className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <span>Verifikasi Email Aktivasi Akun</span>
               </div>
               <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
-                Kode OTP 6 digit bersifat <strong>rahasia</strong> dan telah dikirim ke nomor WhatsApp Anda. Akun Anda akan aktif segera setelah nomor WhatsApp berhasil diverifikasi.
+                Kode OTP 6 digit telah dikirimkan ke alamat email <strong>{verificationEmail || 'Anda'}</strong>. Silakan periksa kotak masuk (Inbox) atau folder Spam, lalu masukkan kode di bawah ini agar akun Anda langsung aktif.
               </p>
             </div>
 
             <div>
               <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
-                Kode OTP WhatsApp (6 Digit)
+                Kode OTP Email (6 Digit)
               </label>
               <input
                 type="text"
@@ -984,7 +1119,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               disabled={isSubmitting || otpCode.length < 4}
               className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs rounded-xl shadow-md transition-all disabled:opacity-50 min-h-[44px]"
             >
-              {isSubmitting ? 'Memverifikasi...' : 'Konfirmasi Verifikasi Nomor WhatsApp'}
+              {isSubmitting ? 'Memverifikasi...' : 'Verifikasi Email & Aktifkan Akun Sekarang'}
             </button>
 
             <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-2.5 text-xs pt-2">
@@ -994,12 +1129,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 className="w-full sm:w-auto py-2.5 px-3.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-xl flex items-center justify-center space-x-1.5 text-slate-700 dark:text-slate-300 font-bold transition-colors"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Ubah Data Pendaftaran</span>
+                <span>Ubah Data</span>
               </button>
 
               <button
                 type="button"
-                onClick={handleResendOtp}
+                onClick={() => handleSendEmailOtp(false)}
                 disabled={isSubmitting || otpCooldown > 0}
                 className={`w-full sm:w-auto py-2.5 px-3.5 rounded-xl flex items-center justify-center space-x-1.5 font-bold text-xs transition-all ${
                   otpCooldown > 0
@@ -1009,9 +1144,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${otpCooldown > 0 ? 'animate-spin opacity-40' : ''}`} />
                 <span>
-                  {otpCooldown > 0
-                    ? `Kirim Ulang (${otpCooldown}s)`
-                    : 'Kirim Ulang OTP ke WA'}
+                  {otpCooldown > 0 ? `Kirim Ulang (${otpCooldown}s)` : 'Kirim Ulang OTP ke Email'}
                 </span>
               </button>
             </div>

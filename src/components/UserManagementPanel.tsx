@@ -525,10 +525,10 @@ export const UserManagementPanel: React.FC = () => {
                       </td>
 
                       <td className="px-4 py-3">
-                        {!u.wa_verified || !u.is_active ? (
+                        {!u.email_verified && !u.is_active ? (
                           <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-[10px] font-black bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-500/30">
                             <Clock className="w-3 h-3 text-amber-600 animate-spin" />
-                            <span>Pending (Verif WA)</span>
+                            <span>Pending (Verif Email)</span>
                           </span>
                         ) : u.plan_status === 'pending_approval' ? (
                           <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-[10px] font-black bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-500/30">

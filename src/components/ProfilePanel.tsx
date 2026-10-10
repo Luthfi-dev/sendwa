@@ -66,8 +66,8 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
   const [emailCooldown, setEmailCooldown] = useState<number>(0);
   const [waCooldown, setWaCooldown] = useState<number>(0);
 
-  // Change Password States (Default WhatsApp, 2nd option Verified Email)
-  const [pwdResetMethod, setPwdResetMethod] = useState<'whatsapp' | 'email'>('whatsapp');
+  // Change Password States (Default Email)
+  const [pwdResetMethod, setPwdResetMethod] = useState<'whatsapp' | 'email'>('email');
   const [pwdOtpSent, setPwdOtpSent] = useState(false);
   const [pwdOtpCode, setPwdOtpCode] = useState('');
   const [newPasswordInput, setNewPasswordInput] = useState('');
@@ -553,15 +553,15 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
         </div>
       </div>
 
-      {/* Card: Account Verification (Email & WhatsApp Verification) */}
+      {/* Card: Account Verification (Email Verification Only) */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-sm space-y-4">
         <div className="flex items-center space-x-2.5 pb-3 border-b border-slate-100 dark:border-slate-800">
           <span className="p-2.5 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 rounded-2xl shrink-0">
             <ShieldCheck className="w-5 h-5" />
           </span>
           <div>
-            <h3 className="text-sm font-black text-slate-900 dark:text-white">Verifikasi Akun &amp; Dua Langkah</h3>
-            <span className="text-xs text-slate-500">Verifikasi alamat email Anda setelah login dan kelola verifikasi nomor WhatsApp Anda</span>
+            <h3 className="text-sm font-black text-slate-900 dark:text-white">Status Verifikasi Akun (Email)</h3>
+            <span className="text-xs text-slate-500">Akun diverifikasi cukup menggunakan alamat Email Anda dan langsung aktif penuh</span>
           </div>
         </div>
 
@@ -571,21 +571,21 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
+        <div className="pt-1">
           {/* Email Verification Block */}
           <div className="p-4 sm:p-5 bg-slate-50 dark:bg-slate-950 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
             <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-1.5">
               <span className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-                <Mail className="w-4 h-4 text-emerald-600 shrink-0" /> Verifikasi Alamat Email (Setelah Login)
+                <Mail className="w-4 h-4 text-emerald-600 shrink-0" /> Verifikasi Alamat Email Utama
               </span>
-              <span className={`self-start sm:self-auto px-2.5 py-0.5 rounded-full text-[10px] font-black ${currentUser?.email_verified ? 'bg-emerald-500/10 text-emerald-600 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-600 border border-amber-500/20'}`}>
-                {currentUser?.email_verified ? '✓ Terverifikasi' : 'Belum Verifikasi'}
+              <span className={`self-start sm:self-auto px-2.5 py-0.5 rounded-full text-[10px] font-black ${currentUser?.email_verified || currentUser?.is_active ? 'bg-emerald-500/10 text-emerald-600 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-600 border border-amber-500/20'}`}>
+                {currentUser?.email_verified || currentUser?.is_active ? '✓ Akun Aktif & Terverifikasi' : 'Belum Verifikasi'}
               </span>
             </div>
             <p className="text-[11px] text-slate-500 leading-relaxed">
-              Email aktif Anda: <strong className="text-slate-700 dark:text-slate-300 font-extrabold break-all">{currentUser?.email}</strong>. Verifikasi email ini agar dapat digunakan sebagai opsi kedua saat ganti/reset password.
+              Email terdaftar Anda: <strong className="text-slate-700 dark:text-slate-300 font-extrabold break-all">{currentUser?.email}</strong>. Nomor kontak WhatsApp profil: <strong className="text-slate-700 dark:text-slate-300 font-extrabold">{currentUser?.phone || '-'}</strong>.
             </p>
-            {!currentUser?.email_verified && (
+            {!currentUser?.email_verified && !currentUser?.is_active && (
               <div className="space-y-2.5 pt-1">
                 {!showEmailInput ? (
                   <button
@@ -626,67 +626,6 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
                       className="text-[11px] text-slate-500 hover:underline block text-left disabled:opacity-50"
                     >
                       {emailCooldown > 0 ? `Kirim ulang kode OTP (${emailCooldown}s)` : 'Kirim ulang kode OTP'}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* WhatsApp Verification Block */}
-          <div className="p-4 sm:p-5 bg-slate-50 dark:bg-slate-950 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
-            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-1.5">
-              <span className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-                <Smartphone className="w-4 h-4 text-emerald-600 shrink-0" /> Verifikasi Nomor WhatsApp (Utama)
-              </span>
-              <span className={`self-start sm:self-auto px-2.5 py-0.5 rounded-full text-[10px] font-black ${currentUser?.wa_verified ? 'bg-emerald-500/10 text-emerald-600 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-600 border border-amber-500/20'}`}>
-                {currentUser?.wa_verified ? '✓ Terverifikasi' : 'Belum Verifikasi'}
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              Nomor WhatsApp Anda: <strong className="text-slate-700 dark:text-slate-300 font-extrabold">{currentUser?.phone || 'Belum Diatur'}</strong>. OTP dikirim secara rahasia melalui WhatsApp Sistem.
-            </p>
-            {!currentUser?.wa_verified && (
-              <div className="space-y-2.5 pt-1">
-                {!showWaInput ? (
-                  <button
-                    onClick={handleSendWaOtp}
-                    disabled={isSendingWaOtp || !currentUser?.phone || waCooldown > 0}
-                    className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition-all flex items-center justify-center space-x-1.5 shadow-xs disabled:opacity-55"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isSendingWaOtp || waCooldown > 0 ? 'animate-spin' : ''}`} />
-                    <span>
-                      {isSendingWaOtp
-                        ? 'Mengirim...'
-                        : waCooldown > 0
-                        ? `Kirim Ulang (${waCooldown}s)`
-                        : 'Kirim Kode OTP ke WhatsApp'}
-                    </span>
-                  </button>
-                ) : (
-                  <div className="space-y-2.5">
-                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                      <input
-                        type="text"
-                        value={waOtp}
-                        onChange={e => setWaOtp(e.target.value)}
-                        placeholder="Masukkan 6-digit OTP"
-                        className="flex-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2.5 text-xs font-bold tracking-widest text-center focus:outline-none"
-                      />
-                      <button
-                        onClick={handleVerifyWaOtp}
-                        disabled={isVerifyingWa || !waOtp}
-                        className="w-full sm:w-auto px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs rounded-xl shadow-xs disabled:opacity-55"
-                      >
-                        {isVerifyingWa ? 'Verifikasi...' : 'Verifikasi'}
-                      </button>
-                    </div>
-                    <button
-                      onClick={handleSendWaOtp}
-                      disabled={isSendingWaOtp || waCooldown > 0}
-                      className="text-[11px] text-slate-500 hover:underline block text-left disabled:opacity-50"
-                    >
-                      {waCooldown > 0 ? `Kirim ulang kode OTP (${waCooldown}s)` : 'Kirim ulang kode OTP'}
                     </button>
                   </div>
                 )}

@@ -1,5 +1,3 @@
-import fs from 'fs';
-import path from 'path';
 import {
   WhatsAppMessageLog,
   AutoReplyRule,
@@ -26,26 +24,202 @@ import {
 } from './security.js';
 
 let cachedMemoryDb: LocalDatabase | null = null;
-let saveDebounceTimer: NodeJS.Timeout | null = null;
+let lastLocalMutationAt = 0;
+
+function markMutated() {
+  lastLocalMutationAt = Date.now();
+}
 
 function asyncSyncMessage(msg: WhatsAppMessageLog) {
+  markMutated();
   import('./mysqlService.js').then(m => m.pushMessageToMysql(msg)).catch(() => {});
 }
 
+function asyncClearMessages(userId?: string) {
+  markMutated();
+  import('./mysqlService.js').then(m => m.clearMessagesFromMysql(userId)).catch(() => {});
+}
+
 function asyncSyncSession(sess: WhatsAppSession) {
+  markMutated();
   import('./mysqlService.js').then(m => m.pushSessionToMysql(sess)).catch(() => {});
 }
 
+function asyncDeleteSession(id: string, phoneNumber?: string) {
+  markMutated();
+  import('./mysqlService.js').then(m => m.deleteSessionFromMysql(id, phoneNumber)).catch(() => {});
+}
+
 function asyncSyncUser(u: UserAccount) {
+  markMutated();
   import('./mysqlService.js').then(m => m.pushUserToMysql(u)).catch(() => {});
 }
 
+function asyncDeleteUser(id: string) {
+  markMutated();
+  import('./mysqlService.js').then(m => m.deleteUserFromMysql(id)).catch(() => {});
+}
+
 function asyncSyncRule(r: AutoReplyRule) {
+  markMutated();
   import('./mysqlService.js').then(m => m.pushRuleToMysql(r)).catch(() => {});
 }
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'database.json');
+function asyncDeleteRule(id: string) {
+  markMutated();
+  import('./mysqlService.js').then(m => m.deleteRuleFromMysql(id)).catch(() => {});
+}
+
+function asyncSyncSmtp(acc: SmtpAccount) {
+  markMutated();
+  import('./mysqlService.js').then(m => m.pushSmtpAccountToMysql(acc)).catch(() => {});
+}
+
+function asyncSyncGeminiKey(key: GeminiApiKey) {
+  markMutated();
+  import('./mysqlService.js').then(m => m.pushGeminiKeyToMysql(key)).catch(() => {});
+}
+
+function asyncDeleteGeminiKey(id: string) {
+  markMutated();
+  import('./mysqlService.js').then(m => m.deleteGeminiKeyFromMysql(id)).catch(() => {});
+}
+
+function asyncSyncKv(key: string, val: any) {
+  markMutated();
+  import('./mysqlService.js').then(m => m.pushKvSettingToMysql(key, val)).catch(() => {});
+}
+
+export function replaceRuntimeDatabaseFromMysql(remote: any): void {
+  const db = initDbFile();
+  if (!remote) return;
+
+  if (remote.users && Array.isArray(remote.users) && remote.users.length > 0) {
+    const localMap = new Map(db.users.map(u => [u.id, u]));
+    db.users = remote.users.map((ru: UserAccount) => {
+      const local = localMap.get(ru.id);
+      const hasPendingOtp = Boolean(ru.verification_otp && String(ru.verification_otp).trim().length > 0);
+      const emailVerified = Boolean(ru.email_verified) || Boolean(local?.email_verified) || !hasPendingOtp || ru.role === 'admin';
+      const waVerified = Boolean(ru.wa_verified) || Boolean(local?.wa_verified) || emailVerified;
+      const isActive = Boolean(ru.is_active) || Boolean(local?.is_active) || emailVerified;
+      return {
+        ...local,
+        ...ru,
+        wa_verified: waVerified,
+        email_verified: emailVerified,
+        is_active: isActive,
+        plan_status:
+          ru.plan_id === 'free' || !ru.plan_id
+            ? 'active'
+            : ru.plan_status || local?.plan_status || 'active',
+        last_login_device: local?.last_login_device,
+        approved_at: local?.approved_at || ru.approved_at,
+        rules_initialized: local?.rules_initialized ?? true
+      };
+    });
+  }
+
+  if (remote.smtpAccounts && Array.isArray(remote.smtpAccounts) && remote.smtpAccounts.length > 0) {
+    db.smtpAccounts = remote.smtpAccounts;
+  }
+
+  if (remote.geminiKeys && Array.isArray(remote.geminiKeys) && remote.geminiKeys.length > 0) {
+    db.geminiKeys = remote.geminiKeys;
+  }
+
+  if (remote.sessions && Array.isArray(remote.sessions) && remote.sessions.length > 0) {
+    const localSessMap = new Map(db.sessions.map(s => [s.id, s]));
+    const remoteIds = new Set(remote.sessions.map((rs: WhatsAppSession) => rs.id));
+    const mergedSessions = remote.sessions.map((rs: WhatsAppSession) => {
+      const local = localSessMap.get(rs.id);
+      const resolvedUserId =
+        rs.user_id ||
+        local?.user_id ||
+        extractUserIdFromSessionId(rs.id, db.users || []);
+      const resolvedStatus =
+        local?.status === 'connected' ? 'connected' : rs.status || local?.status || 'connected';
+      return {
+        ...local,
+        ...rs,
+        user_id: resolvedUserId,
+        status: resolvedStatus,
+        is_primary: Boolean(rs.is_primary),
+        connected_at: rs.connected_at || local?.connected_at || new Date().toISOString(),
+        expires_at:
+          rs.expires_at ||
+          local?.expires_at ||
+          new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+      };
+    });
+    for (const localSess of db.sessions) {
+      if (localSess.id && !remoteIds.has(localSess.id) && localSess.status === 'connected') {
+        mergedSessions.push(localSess);
+      }
+    }
+    db.sessions = mergedSessions;
+  }
+
+  if (remote.rules && Array.isArray(remote.rules) && remote.rules.length > 0) {
+    const localRuleMap = new Map(db.rules.map(r => [r.id, r]));
+    db.rules = remote.rules.map((rr: AutoReplyRule) => {
+      const local = localRuleMap.get(rr.id);
+      let resolvedUserId = rr.user_id || local?.user_id;
+      if (!resolvedUserId && rr.id.startsWith('rule_halo_')) {
+        resolvedUserId = rr.id.replace('rule_halo_', '');
+      }
+      return {
+        ...local,
+        ...rr,
+        user_id: resolvedUserId || 'user_superadmin',
+        is_active: Boolean(rr.is_active)
+      };
+    });
+  }
+
+  if (remote.messages && Array.isArray(remote.messages) && remote.messages.length > 0) {
+    db.messages = remote.messages;
+  }
+
+  if (remote.kvMap) {
+    if (remote.kvMap.systemConfig) {
+      db.systemConfig = {
+        ...db.systemConfig,
+        ...remote.kvMap.systemConfig,
+        mysql_password: remote.kvMap.systemConfig.mysql_password || db.systemConfig.mysql_password
+      };
+    }
+    if (Array.isArray(remote.kvMap.plans) && remote.kvMap.plans.length > 0) {
+      db.plans = remote.kvMap.plans;
+    }
+    if (remote.kvMap.antiBan) {
+      db.antiBan = { ...db.antiBan, ...remote.kvMap.antiBan };
+    }
+    if (Array.isArray(remote.kvMap.broadcastHistory)) {
+      db.broadcastHistory = remote.kvMap.broadcastHistory;
+    }
+    if (remote.kvMap.stats) {
+      db.stats = { ...db.stats, ...remote.kvMap.stats };
+    }
+  }
+}
+
+// Real-time periodic background sync from Online MySQL Database (every 5s)
+setInterval(() => {
+  if (Date.now() - lastLocalMutationAt < 4000) {
+    return;
+  }
+  import('./mysqlService.js')
+    .then(async m => {
+      const remote = await m.fetchDatabaseFromMysql();
+      if (Date.now() - lastLocalMutationAt < 4000) {
+        return;
+      }
+      if (remote) {
+        replaceRuntimeDatabaseFromMysql(remote);
+      }
+    })
+    .catch(() => {});
+}, 5000);
 
 export interface BroadcastLogEntry {
   id: string;
@@ -95,10 +269,10 @@ const DEFAULT_ANTIBAN: AntiBanSettings = {
 
 const DEFAULT_AI_CONFIG: AiBotConfig = {
   enabled: true,
-  system_prompt: 'Anda adalah Customer Service Assistant untuk bisnis yang ramah, sopan, ringkas, dan solutif. Jawab pertanyaan pelanggan dengan ramah dalam Bahasa Indonesia yang natural.',
-  model: 'gemini-3.8-flash',
+  system_prompt: 'Anda adalah Customer Service Assistant untuk bisnis yang ramah nama kamu Anita, sopan, ringkas, dan solutif. Jawab pertanyaan pelanggan dengan ramah dalam Bahasa Indonesia yang natural. Jika tidak tahu pasti mengenai stok atau harga spesifik, sampaikan bahwa tim CS manusia akan segera merespons. Ingat jangan menjawab sesuatu yg kamu tidak ketahui pasti jawab saja team kami akan segera membalas untuk hal itu.',
+  model: 'gemini-2.5-flash',
   fallback_when_no_rule: true,
-  temperature: 0.3,
+  temperature: 0.7,
   offline_fallback_message: 'Halo! Terima kasih telah menghubungi kami. Maaf saat ini petugas/CS kami sedang offline. Kami akan membalas pesan Anda sesegera mungkin.'
 };
 
@@ -114,11 +288,11 @@ export const DEFAULT_WHITELABEL: AppWhitelabelConfig = {
   app_name: 'Japriin',
   tagline: 'Whitelabel WhatsApp Gateway, Interactive REST API & Remote AI Bot',
   logo_url: '/src/assets/images/japriin_logo_1791445508697.jpg',
-  company_name: 'PT Japriin Teknologi Indonesia',
+  company_name: 'Maudigi Teknologi Indonesia',
   support_phone: '081234567890',
-  primary_bot_phone: '081234567890',
+  primary_bot_phone: '085761010112',
   primary_bot_name: 'Japriin Assistant Pusat',
-  footer_text: 'Dikelola secara profesional oleh Japriin.com',
+  footer_text: 'Dikelola secara profesional oleh maudigi.com',
   api_enabled: true,
   updated_at: new Date().toISOString()
 };
@@ -224,7 +398,7 @@ const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
   mysql_host: process.env.MYSQL_HOST || '15.235.193.207',
   mysql_port: parseInt(process.env.MYSQL_PORT || '3306') || 3306,
   mysql_user: process.env.MYSQL_USER || 'maudigic_baru',
-  mysql_password: process.env.MYSQL_PASSWORD || '',
+  mysql_password: process.env.MYSQL_PASSWORD || 'B4ru123456_',
   mysql_database: process.env.MYSQL_DATABASE || 'maudigic_whatsappsend',
   ai_config: DEFAULT_AI_CONFIG,
   qris_config: DEFAULT_QRIS_CONFIG,
@@ -233,16 +407,16 @@ const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
 
 export const SUBSCRIPTION_PLANS = DEFAULT_SUBSCRIPTION_PLANS;
 
-// Default initial users
+// Default initial users (synced with Online MySQL DB)
 const DEFAULT_USERS: UserAccount[] = [
   {
-    id: 'usr_superadmin',
+    id: 'user_superadmin',
     username: 'superadmin',
     name: 'Super Administrator',
     role: 'admin',
-    email: 'superadmin@japriin.com',
-    phone: '081234567890',
-    password: hashPassword('superadmin'),
+    email: 'superadmin@maudigi.com',
+    phone: '6281234567890',
+    password: hashPassword('123456'),
     is_active: true,
     email_verified: true,
     wa_verified: true,
@@ -252,20 +426,22 @@ const DEFAULT_USERS: UserAccount[] = [
     security_pin: hashPin('123456'),
     pin_failed_attempts: 0,
     is_bot_locked: false,
-    api_key: 'mgw_live_superadmin_master_key_99',
+    api_key: 'mgw_supe_9f352b6c7b250648ca713d473e0d28a0',
     daily_messages_sent: 0,
     monthly_messages_sent: 0,
+    default_cs_reply_enabled: true,
+    default_cs_reply_text: 'Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin.',
     created_at: new Date().toISOString(),
     approved_at: new Date().toISOString()
   },
   {
-    id: 'usr_admin',
+    id: 'user_admin',
     username: 'admin',
-    name: 'Admin Japriin',
+    name: 'Administrator Maudigi',
     role: 'admin',
-    email: 'admin@japriin.com',
-    phone: '081298765432',
-    password: hashPassword('admin'),
+    email: 'admin@maudigi.com',
+    phone: '6281234567891',
+    password: hashPassword('123456'),
     is_active: true,
     email_verified: true,
     wa_verified: true,
@@ -275,20 +451,47 @@ const DEFAULT_USERS: UserAccount[] = [
     security_pin: hashPin('123456'),
     pin_failed_attempts: 0,
     is_bot_locked: false,
-    api_key: 'mgw_live_admin_general_key_77',
+    api_key: 'mgw_admi_6bcc24a0651060fb16da916511747730',
     daily_messages_sent: 0,
     monthly_messages_sent: 0,
+    default_cs_reply_enabled: true,
+    default_cs_reply_text: 'Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin.',
     created_at: new Date().toISOString(),
     approved_at: new Date().toISOString()
   },
   {
-    id: 'usr_user',
+    id: 'user_regular',
     username: 'user',
-    name: 'Operator Chat User',
+    name: 'Pengguna User',
     role: 'user',
-    email: 'user@japriin.com',
-    phone: '085712345678',
-    password: hashPassword('user'),
+    email: 'user@maudigi.com',
+    phone: '6289876543210',
+    password: hashPassword('123456'),
+    is_active: true,
+    email_verified: true,
+    wa_verified: true,
+    plan_id: 'business',
+    plan_status: 'active',
+    max_sessions: 1,
+    security_pin: hashPin('123456'),
+    pin_failed_attempts: 0,
+    is_bot_locked: false,
+    api_key: 'mgw_user_8db1a05fbf815653a2da983d8e875e26',
+    daily_messages_sent: 0,
+    monthly_messages_sent: 0,
+    default_cs_reply_enabled: true,
+    default_cs_reply_text: 'Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin.',
+    created_at: new Date().toISOString(),
+    approved_at: new Date().toISOString()
+  },
+  {
+    id: 'user_regular_b',
+    username: 'user_b',
+    name: 'Pengguna B (Akun Terpisah)',
+    role: 'user',
+    email: 'user_b@maudigi.com',
+    phone: '6285261629099',
+    password: hashPassword('123456'),
     is_active: true,
     email_verified: true,
     wa_verified: true,
@@ -298,34 +501,42 @@ const DEFAULT_USERS: UserAccount[] = [
     security_pin: hashPin('123456'),
     pin_failed_attempts: 0,
     is_bot_locked: false,
-    api_key: 'mgw_live_user_client_key_33',
+    api_key: 'mgw_userb_9f352b6c7b250648ca713d473e0d28a0',
     daily_messages_sent: 0,
     monthly_messages_sent: 0,
+    default_cs_reply_enabled: true,
+    default_cs_reply_text: 'Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin.',
     created_at: new Date().toISOString(),
     approved_at: new Date().toISOString()
-  },
+  }
+];
+
+const DEFAULT_SMTP_ACCOUNTS: SmtpAccount[] = [
   {
-    id: 'usr_user_b',
-    username: 'user_b',
-    name: 'Operator Chat User B',
-    role: 'user',
-    email: 'user_b@japriin.com',
-    phone: '085261629099',
-    password: hashPassword('user_b'),
+    id: 'smtp_1791565356300_3elr',
+    name: 'df',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    user: 'dilfarisna@gmail.com',
+    pass: 'f0c69ef29e00645d80402ee2f51c9909:e44b000a51ca99a0cd2bf8ffded35680842edecb6cd30e229f676338499d0668',
+    sender_name: 'Japriin',
     is_active: true,
-    email_verified: true,
-    wa_verified: true,
-    plan_id: 'free',
-    plan_status: 'active',
-    max_sessions: 2,
-    security_pin: hashPin('123456'),
-    pin_failed_attempts: 0,
-    is_bot_locked: false,
-    api_key: 'mgw_live_user_b_client_key_44',
-    daily_messages_sent: 0,
-    monthly_messages_sent: 0,
-    created_at: new Date().toISOString(),
-    approved_at: new Date().toISOString()
+    success_count: 0,
+    error_count: 0,
+    created_at: '2026-10-09T17:02:36.000Z'
+  }
+];
+
+const DEFAULT_GEMINI_KEYS: GeminiApiKey[] = [
+  {
+    id: 'gem_1791393945670_yy48',
+    name: 'K1',
+    key: '5e31dbef155fff915a6e9434380ae683:bd149700fe586aec68273380c8cc0310bdb76ba31eec62f07ca2df096617087b4b7319fd9c33ba02af1bbda6abcfcac6',
+    is_active: true,
+    usage_count: 29,
+    error_count: 1,
+    created_at: '2026-10-07T17:25:45.671Z'
   }
 ];
 
@@ -343,258 +554,61 @@ setInterval(() => {
 }, 60000);
 
 export function initDbFile(): LocalDatabase {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-
-  if (!fs.existsSync(DB_FILE)) {
-    const initialDb: LocalDatabase = {
-      messages: [],
-      rules: [
-        {
-          id: 'rule_1',
-          keyword: 'halo',
-          match_type: 'contains',
-          response_text: 'Halo kak {nama}! Selamat datang di layanan kami. Ada yang bisa kami bantu seputar pesanan atau informasi produk?',
-          is_active: true,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        },
-        {
-          id: 'rule_2',
-          keyword: 'harga',
-          match_type: 'contains',
-          response_text: 'Halo kak {nama}, daftar harga produk kami sangat terjangkau mulai dari Rp 50.000. Cek katalog lengkap di website kami ya kak!',
-          is_active: true,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        }
-      ],
-      sessions: [
-        {
-          id: 'sess_primary_app_gateway',
-          session_name: 'Nomor Gateway Utama Aplikasi & Bot',
-          phone_number: '081234567890',
-          auth_method: 'pairing_code',
-          status: 'connected',
-          is_primary: true,
-          pairing_code: 'MDGW-8822',
-          connected_at: new Date().toISOString(),
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        }
-      ],
-      antiBan: DEFAULT_ANTIBAN,
-      users: DEFAULT_USERS,
-      plans: DEFAULT_SUBSCRIPTION_PLANS,
-      smtpAccounts: [],
-      geminiKeys: process.env.GEMINI_API_KEY ? [
-        {
-          id: 'gem_default_env',
-          name: 'Primary Environment Key',
-          key: encryptData(process.env.GEMINI_API_KEY),
-          is_active: true,
-          usage_count: 0,
-          error_count: 0,
-          created_at: new Date().toISOString()
-        }
-      ] : [],
-      systemConfig: DEFAULT_SYSTEM_CONFIG,
-      stats: {
-        total_incoming: 0,
-        total_auto_replied: 0,
-        total_failed: 0,
-        total_ai_replied: 0
-      }
-    };
-    fs.writeFileSync(DB_FILE, JSON.stringify(initialDb, null, 2), 'utf-8');
-    cachedMemoryDb = initialDb;
-    return initialDb;
-  }
-
   if (cachedMemoryDb) {
     return cachedMemoryDb;
   }
 
-  try {
-    const content = fs.readFileSync(DB_FILE, 'utf-8');
-    const parsed = JSON.parse(content);
-    let dbMigrated = false;
+  const initialDb: LocalDatabase = {
+    messages: [],
+    broadcastHistory: [],
+    rules: [
+      {
+        id: 'rule-1',
+        user_id: 'user_superadmin',
+        keyword: 'halo',
+        match_type: 'contains',
+        response_text: 'Halo! Selamat datang di layanan WhatsApp Gateway kami. Ada yang bisa kami bantu?',
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }
+    ],
+    sessions: [
+      {
+        id: 'session_user_user_superadmin_6285761010112',
+        user_id: 'user_superadmin',
+        session_name: 'WA Pair - 6285761010112',
+        phone_number: '6285761010112',
+        auth_method: 'pairing_code',
+        status: 'connected',
+        is_primary: true,
+        connected_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+      }
+    ],
+    antiBan: DEFAULT_ANTIBAN,
+    users: DEFAULT_USERS,
+    plans: DEFAULT_SUBSCRIPTION_PLANS,
+    smtpAccounts: DEFAULT_SMTP_ACCOUNTS,
+    geminiKeys: DEFAULT_GEMINI_KEYS,
+    systemConfig: DEFAULT_SYSTEM_CONFIG,
+    stats: {
+      total_incoming: 0,
+      total_auto_replied: 0,
+      total_failed: 0,
+      total_ai_replied: 0
+    }
+  };
 
-    // Schema Migrations & Fallbacks
-    if (!parsed.plans || parsed.plans.length === 0) {
-      parsed.plans = DEFAULT_SUBSCRIPTION_PLANS;
-    } else {
-      parsed.plans = parsed.plans.map((p: any) => {
-        const def = DEFAULT_SUBSCRIPTION_PLANS.find(dp => dp.id === p.id);
-        return {
-          ...p,
-          daily_ai_limit: p.daily_ai_limit ?? def?.daily_ai_limit ?? 50,
-          monthly_ai_limit: p.monthly_ai_limit ?? def?.monthly_ai_limit ?? 1500
-        };
-      });
-    }
-    if (!parsed.systemConfig) {
-      parsed.systemConfig = DEFAULT_SYSTEM_CONFIG;
-    } else {
-      if (!parsed.systemConfig.mysql_host || parsed.systemConfig.mysql_host === 'localhost') {
-        parsed.systemConfig.mysql_host = process.env.MYSQL_HOST || '15.235.193.207';
-      }
-      if (!parsed.systemConfig.mysql_user || parsed.systemConfig.mysql_user === 'root') {
-        parsed.systemConfig.mysql_user = process.env.MYSQL_USER || 'maudigic_baru';
-      }
-      if (!parsed.systemConfig.mysql_database || parsed.systemConfig.mysql_database === 'maudigi_wa_gateway') {
-        parsed.systemConfig.mysql_database = process.env.MYSQL_DATABASE || 'maudigic_whatsappsend';
-      }
-      if (!parsed.systemConfig.ai_config) {
-        parsed.systemConfig.ai_config = DEFAULT_AI_CONFIG;
-      } else {
-        // Ensure AI Auto-reply fallback is ON by default and model is fast gemini-2.5-flash
-        parsed.systemConfig.ai_config.enabled = true;
-        parsed.systemConfig.ai_config.fallback_when_no_rule = true;
-        if (!parsed.systemConfig.ai_config.model || parsed.systemConfig.ai_config.model === 'gemini-3.8-flash') {
-          parsed.systemConfig.ai_config.model = 'gemini-2.5-flash';
-        }
-        if (!parsed.systemConfig.ai_config.offline_fallback_message) {
-          parsed.systemConfig.ai_config.offline_fallback_message = 'Halo! Terima kasih telah menghubungi kami. Maaf saat ini petugas/CS kami sedang offline. Kami akan membalas pesan Anda sesegera mungkin.';
-        }
-      }
-    }
-    if (!parsed.systemConfig.whitelabel_config) {
-      parsed.systemConfig.whitelabel_config = DEFAULT_WHITELABEL;
-    } else if (
-      !parsed.systemConfig.whitelabel_config.logo_url ||
-      parsed.systemConfig.whitelabel_config.logo_url.includes('maudigi_wa_icon_1785143465240.jpg')
-    ) {
-      parsed.systemConfig.whitelabel_config.logo_url = DEFAULT_WHITELABEL.logo_url;
-    }
-    if (!parsed.geminiKeys) {
-      parsed.geminiKeys = [];
-    }
-    if (!Array.isArray(parsed.smtpAccounts)) {
-      parsed.smtpAccounts = [];
-    }
-    if (!parsed.antiBan) {
-      parsed.antiBan = DEFAULT_ANTIBAN;
-    }
-    if (!parsed.users || parsed.users.length === 0) {
-      parsed.users = DEFAULT_USERS;
-    }
-
-    // Ensure users have pins, api_keys, quota fields, and secure password hashes
-    parsed.users.forEach((u: UserAccount) => {
-      if (!u.password || u.password.endsWith('_hash_placeholder') || u.password.length < 32) {
-        const defPw = u.username === 'superadmin' ? 'superadmin' : (u.username === 'admin' ? 'admin' : (u.username === 'user' ? 'user' : '123456'));
-        u.password = hashPassword(u.password && !u.password.endsWith('_hash_placeholder') && u.password.length > 0 ? u.password : defPw);
-        dbMigrated = true;
-      }
-      if (!u.security_pin) u.security_pin = hashPin('123456');
-      if (u.pin_failed_attempts === undefined) u.pin_failed_attempts = 0;
-      if (u.is_bot_locked === undefined) u.is_bot_locked = false;
-      if (!u.api_key) u.api_key = generateApiKey(`mgw_${u.username.substring(0, 4)}_`);
-      if (u.daily_messages_sent === undefined) u.daily_messages_sent = 0;
-      if (u.monthly_messages_sent === undefined) u.monthly_messages_sent = 0;
-      if (u.daily_ai_sent === undefined) u.daily_ai_sent = 0;
-      if (u.monthly_ai_sent === undefined) u.monthly_ai_sent = 0;
-      if (u.default_cs_reply_enabled === undefined) {
-        u.default_cs_reply_enabled = true;
-        dbMigrated = true;
-      }
-      if (!u.default_cs_reply_text) {
-        u.default_cs_reply_text = 'Halo kak *{nama}*! Terima kasih telah menghubungi kami. Tim Customer Service kami akan segera membalas pesan Anda sesegera mungkin.';
-        dbMigrated = true;
-      }
-    });
-
-    // Ensure session IDs retain their rightful user_id if encoded in their session key
-    if (parsed.sessions && parsed.sessions.length > 0) {
-      parsed.sessions.forEach((s: any) => {
-        if (!s.user_id && s.id && s.id.startsWith('session_user_')) {
-          const extracted = s.id.replace('session_user_', '').split('_')[0];
-          if (extracted) {
-            s.user_id = extracted;
-            dbMigrated = true;
-          }
-        }
-        if (!s.expires_at) {
-          const baseDate = s.connected_at ? new Date(s.connected_at).getTime() : (s.created_at ? new Date(s.created_at).getTime() : Date.now());
-          s.expires_at = new Date(baseDate + 30 * 24 * 60 * 60 * 1000).toISOString();
-          dbMigrated = true;
-        }
-      });
-    }
-
-    // Auto-purge message logs & broadcast history older than 7 days on load
-    const cutoffMs = Date.now() - LOG_RETENTION_MS;
-    if (Array.isArray(parsed.messages) && parsed.messages.length > 0) {
-      const beforeMsgLen = parsed.messages.length;
-      parsed.messages = parsed.messages.filter((m: any) => {
-        if (!m?.created_at) return true;
-        const ts = new Date(m.created_at).getTime();
-        return isNaN(ts) || ts >= cutoffMs;
-      });
-      if (parsed.messages.length !== beforeMsgLen) dbMigrated = true;
-    }
-    if (Array.isArray(parsed.broadcastHistory) && parsed.broadcastHistory.length > 0) {
-      const beforeBcLen = parsed.broadcastHistory.length;
-      parsed.broadcastHistory = parsed.broadcastHistory.filter((b: any) => {
-        if (!b?.created_at) return true;
-        const ts = new Date(b.created_at).getTime();
-        return isNaN(ts) || ts >= cutoffMs;
-      });
-      if (parsed.broadcastHistory.length !== beforeBcLen) dbMigrated = true;
-    } else if (!Array.isArray(parsed.broadcastHistory)) {
-      parsed.broadcastHistory = [];
-    }
-
-    // Ensure all existing auto-reply rules have user_id assigned (default to superadmin to prevent leaking)
-    if (Array.isArray(parsed.rules)) {
-      parsed.rules.forEach((r: any) => {
-        if (!r.user_id) {
-          r.user_id = 'user_superadmin';
-          dbMigrated = true;
-        }
-      });
-    } else {
-      parsed.rules = [];
-      dbMigrated = true;
-    }
-
-    if (dbMigrated) {
-      try {
-        fs.writeFileSync(DB_FILE, JSON.stringify(parsed, null, 2), 'utf-8');
-      } catch (e) {
-        // Ignore
-      }
-    }
-
-    cachedMemoryDb = parsed;
-    return parsed;
-  } catch (err) {
-    console.error('Error reading database file, re-initializing:', err);
-    return initDbFile();
-  }
+  cachedMemoryDb = initialDb;
+  return initialDb;
 }
 
-export function writeDbFile(data: LocalDatabase, immediate = false): void {
+export function writeDbFile(data: LocalDatabase, _immediate = false): void {
+  markMutated();
   cachedMemoryDb = data;
-  if (saveDebounceTimer) {
-    clearTimeout(saveDebounceTimer);
-    saveDebounceTimer = null;
-  }
-  if (immediate) {
-    try {
-      fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
-    } catch (err) {
-      console.error('Failed to synchronously write database file:', err);
-    }
-    return;
-  }
-  saveDebounceTimer = setTimeout(() => {
-    fs.writeFile(DB_FILE, JSON.stringify(data, null, 2), 'utf-8', (err) => {
-      if (err) console.error('Failed to asynchronously write database file:', err);
-    });
-  }, 100);
 }
 
 // ==========================================
@@ -609,6 +623,7 @@ export function saveSubscriptionPlans(plans: SubscriptionPlan[]): SubscriptionPl
   const db = initDbFile();
   db.plans = plans;
   writeDbFile(db, true);
+  asyncSyncKv('plans', db.plans);
   return db.plans;
 }
 
@@ -623,6 +638,7 @@ export function updateSubscriptionPlan(id: string, updates: Partial<Subscription
     updated_at: new Date().toISOString()
   };
   writeDbFile(db, true);
+  asyncSyncKv('plans', db.plans);
   return db.plans[index];
 }
 
@@ -634,6 +650,7 @@ export function addSubscriptionPlan(planData: Omit<SubscriptionPlan, 'updated_at
   };
   db.plans.push(newPlan);
   writeDbFile(db, true);
+  asyncSyncKv('plans', db.plans);
   return newPlan;
 }
 
@@ -643,6 +660,7 @@ export function deleteSubscriptionPlan(id: string): boolean {
   db.plans = db.plans.filter(p => p.id !== id);
   if (db.plans.length !== beforeCount) {
     writeDbFile(db, true);
+    asyncSyncKv('plans', db.plans);
     return true;
   }
   return false;
@@ -667,6 +685,7 @@ export function updateWhitelabelConfig(updates: Partial<AppWhitelabelConfig>): A
     updated_at: new Date().toISOString()
   };
   writeDbFile(db, true);
+  asyncSyncKv('systemConfig', db.systemConfig);
   return db.systemConfig.whitelabel_config;
 }
 
@@ -696,6 +715,7 @@ export function addGeminiKey(name: string, key: string): GeminiApiKey {
   };
   db.geminiKeys.push(newKey);
   writeDbFile(db);
+  asyncSyncGeminiKey(newKey);
   return newKey;
 }
 
@@ -710,6 +730,7 @@ export function updateGeminiKey(id: string, updates: Partial<GeminiApiKey>): Gem
 
   db.geminiKeys[index] = { ...db.geminiKeys[index], ...updates };
   writeDbFile(db);
+  asyncSyncGeminiKey(db.geminiKeys[index]);
   return db.geminiKeys[index];
 }
 
@@ -719,6 +740,7 @@ export function deleteGeminiKey(id: string): boolean {
   db.geminiKeys = db.geminiKeys.filter(k => k.id !== id);
   if (db.geminiKeys.length !== beforeCount) {
     writeDbFile(db);
+    asyncDeleteGeminiKey(id);
     return true;
   }
   return false;
@@ -731,6 +753,7 @@ export function toggleGeminiKey(id: string): GeminiApiKey | null {
 
   db.geminiKeys[index].is_active = !db.geminiKeys[index].is_active;
   writeDbFile(db);
+  asyncSyncGeminiKey(db.geminiKeys[index]);
   return db.geminiKeys[index];
 }
 
@@ -786,6 +809,7 @@ export function setUserSecurityPin(userId: string, pin: string): { success: bool
   user.pin_failed_attempts = 0;
   user.is_bot_locked = false;
   writeDbFile(db);
+  asyncSyncUser(user);
   return { success: true, message: 'PIN Keamanan berhasil dibuat & disimpan dengan aman!' };
 }
 
@@ -805,6 +829,7 @@ export function unlockUserBot(userId: string): UserAccount | null {
   user.is_bot_locked = false;
   user.pin_failed_attempts = 0;
   writeDbFile(db);
+  asyncSyncUser(user);
   return user;
 }
 
@@ -815,6 +840,7 @@ export function generateUserApiKey(userId: string): string | null {
 
   user.api_key = generateApiKey(`mgw_${user.username.substring(0, 4)}_`);
   writeDbFile(db);
+  asyncSyncUser(user);
   return user.api_key;
 }
 
@@ -865,6 +891,7 @@ export function deductUserDailyQuota(userId: string): { allowed: boolean; remain
   user.daily_messages_sent = (user.daily_messages_sent || 0) + 1;
   user.monthly_messages_sent = (user.monthly_messages_sent || 0) + 1;
   writeDbFile(db);
+  asyncSyncUser(user);
 
   return {
     allowed: true,
@@ -1334,6 +1361,7 @@ export function updateSystemConfig(updates: Partial<SystemConfig>): SystemConfig
   const db = initDbFile();
   db.systemConfig = { ...db.systemConfig, ...updates };
   writeDbFile(db, true);
+  asyncSyncKv('systemConfig', db.systemConfig);
   return db.systemConfig;
 }
 
@@ -1349,6 +1377,7 @@ export function updateQrisConfig(config: any): any {
     updated_at: new Date().toISOString()
   };
   writeDbFile(db, true);
+  asyncSyncKv('systemConfig', db.systemConfig);
   return db.systemConfig.qris_config;
 }
 
@@ -1496,16 +1525,19 @@ export function clearMessageLogs(userId?: string): void {
   const db = initDbFile();
   if (!userId) {
     db.messages = [];
+    asyncClearMessages();
   } else {
     const user = getUserById(userId);
     if (!user || user.role === 'admin') {
       db.messages = [];
+      asyncClearMessages();
     } else {
       const userSessions = getSessionsByUserId(user.id);
       const sessionIds = new Set(userSessions.map(s => s.id));
       db.messages = db.messages.filter(
         m => m.user_id !== user.id && m.user_id !== userId && (!m.session_id || !sessionIds.has(m.session_id))
       );
+      asyncClearMessages(user.id);
     }
   }
   writeDbFile(db);
@@ -1539,6 +1571,7 @@ export function addBroadcastHistory(entry: Omit<BroadcastLogEntry, 'id' | 'creat
     db.broadcastHistory = db.broadcastHistory.slice(0, 200);
   }
   writeDbFile(db);
+  asyncSyncKv('broadcastHistory', db.broadcastHistory);
   return newItem;
 }
 
@@ -1559,6 +1592,7 @@ export function clearBroadcastHistory(userId?: string): void {
     }
   }
   writeDbFile(db);
+  asyncSyncKv('broadcastHistory', db.broadcastHistory);
 }
 
 export function getBotStats(userId?: string): BotStats {
@@ -1759,6 +1793,7 @@ export function deleteAutoReplyRule(id: string, userId?: string): boolean {
   db.rules = db.rules.filter(r => r.id !== id);
   if (db.rules.length !== initialLength) {
     writeDbFile(db);
+    asyncDeleteRule(id);
     return true;
   }
   return false;
@@ -1937,6 +1972,7 @@ export function extendWhatsAppSession(id: string, daysToAdd: number = 30): Whats
     updated_at: new Date().toISOString()
   };
   writeDbFile(db);
+  asyncSyncSession(db.sessions[index]);
   return db.sessions[index];
 }
 
@@ -1956,6 +1992,7 @@ export function updateWhatsAppSession(id: string, updates: Partial<WhatsAppSessi
   };
 
   writeDbFile(db);
+  asyncSyncSession(db.sessions[index]);
   return db.sessions[index];
 }
 
@@ -1974,6 +2011,7 @@ export function deleteWhatsAppSession(id: string): boolean {
 
   if (db.sessions.length !== initialLength) {
     writeDbFile(db);
+    asyncDeleteSession(targetSession?.id || id, targetPhone || undefined);
     return true;
   }
   return false;
@@ -2136,7 +2174,7 @@ export function registerUser(data: {
   const otp = generateOtpCode();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
-  // Account status is PENDING until WhatsApp number is verified via OTP!
+  // Account only requires Email OTP verification to immediately become active!
   const newUser: UserAccount = {
     id: `usr_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
     username: cleanUsername,
@@ -2145,14 +2183,14 @@ export function registerUser(data: {
     email: cleanEmail,
     phone: data.phone?.trim() || '',
     password: hashPassword(data.password || '123456'),
-    is_active: false, // Inactive / Pending until WhatsApp verified
+    is_active: false, // Becomes true immediately upon Email OTP verification
     email_verified: false,
-    wa_verified: false,
+    wa_verified: true, // WA verification not required for account activation
     verification_otp: otp,
     otp_expires_at: expiresAt,
     plan_id: selectedPlanId,
-    plan_status: 'pending_approval', // Pending until WhatsApp verified
-    payment_note: data.payment_note || 'Pending - Menunggu Verifikasi Nomor WhatsApp',
+    plan_status: 'active',
+    payment_note: data.payment_note || 'Menunggu Verifikasi Email OTP',
     payment_receipt_url: data.payment_receipt_url,
     max_sessions: planInfo.max_sessions,
     security_pin: hashPin('123456'),
@@ -2179,6 +2217,7 @@ export function registerUser(data: {
     updated_at: new Date().toISOString()
   };
   db.rules.push(sampleRule);
+  asyncSyncRule(sampleRule);
 
   db.users.push(newUser);
   writeDbFile(db, true);
@@ -2224,7 +2263,8 @@ export function upgradeUserPlan(data: {
     user.plan_status = 'pending_approval';
   }
 
-  writeDbFile(db);
+  writeDbFile(db, true);
+  asyncSyncUser(user);
   return user;
 }
 
@@ -2233,13 +2273,18 @@ export function approveUserSubscription(userId: string): UserAccount | null {
   const user = db.users.find(u => u.id === userId);
   if (!user) return null;
 
+  if (user.requested_plan_id) {
+    user.plan_id = user.requested_plan_id;
+  }
   user.plan_status = 'active';
+  user.is_active = true;
   user.approved_at = new Date().toISOString();
   const plans = db.plans || DEFAULT_SUBSCRIPTION_PLANS;
   const plan = plans.find(p => p.id === user.plan_id);
   if (plan) user.max_sessions = plan.max_sessions;
 
-  writeDbFile(db);
+  writeDbFile(db, true);
+  asyncSyncUser(user);
   return user;
 }
 
@@ -2249,7 +2294,8 @@ export function rejectUserSubscription(userId: string): UserAccount | null {
   if (!user) return null;
 
   user.plan_status = 'rejected';
-  writeDbFile(db);
+  writeDbFile(db, true);
+  asyncSyncUser(user);
   return user;
 }
 
@@ -2258,32 +2304,25 @@ export function deleteUserAccount(userId: string): boolean {
   const beforeCount = db.users.length;
   db.users = db.users.filter(u => u.id !== userId);
   if (db.users.length !== beforeCount) {
-    writeDbFile(db);
+    writeDbFile(db, true);
+    asyncDeleteUser(userId);
     return true;
   }
   return false;
 }
 
-export function verifyUserOtp(userId: string, otp: string, type: 'email' | 'whatsapp'): boolean {
+export function verifyUserOtp(userId: string, otp: string, _type: 'email' | 'whatsapp' = 'email'): boolean {
   const db = initDbFile();
   const user = db.users.find(u => u.id === userId);
   if (!user) return false;
 
-  if (user.verification_otp && user.verification_otp === otp.trim()) {
-    if (type === 'email') {
-      user.email_verified = true;
-    }
-    if (type === 'whatsapp') {
-      user.wa_verified = true;
-      user.is_active = true;
-      if (user.plan_id === 'free' || user.plan_status === 'pending_approval') {
-        user.plan_status = 'active';
-        user.approved_at = user.approved_at || new Date().toISOString();
-        if (!user.payment_note || user.payment_note.includes('Menunggu Verifikasi')) {
-          user.payment_note = 'Aktif (Nomor WhatsApp Terverifikasi)';
-        }
-      }
-    }
+  if (user.verification_otp && String(user.verification_otp).trim() === otp.trim()) {
+    user.email_verified = true;
+    user.wa_verified = true;
+    user.is_active = true;
+    user.plan_status = 'active';
+    user.approved_at = user.approved_at || new Date().toISOString();
+    user.payment_note = 'Aktif (Email Terverifikasi)';
     user.verification_otp = undefined;
     user.otp_expires_at = undefined;
     writeDbFile(db, true);
@@ -2385,7 +2424,10 @@ export const updateSession = updateWhatsAppSession;
 export const deleteSession = deleteWhatsAppSession;
 export const setPrimarySession = (id: string): boolean => {
   const db = initDbFile();
-  db.sessions.forEach(s => { s.is_primary = (s.id === id); });
+  db.sessions.forEach(s => {
+    s.is_primary = (s.id === id);
+    asyncSyncSession(s);
+  });
   writeDbFile(db);
   return true;
 };
@@ -2427,6 +2469,7 @@ export const updateAntiBanSettings = (updates: Partial<AntiBanSettings>): AntiBa
   const db = initDbFile();
   db.antiBan = { ...db.antiBan, ...updates };
   writeDbFile(db);
+  asyncSyncKv('antiBan', db.antiBan);
   return db.antiBan;
 };
 
@@ -2468,6 +2511,7 @@ export const addSmtpAccount = (data: any): SmtpAccount => {
   };
   db.smtpAccounts.push(newAcc);
   writeDbFile(db, true);
+  asyncSyncSmtp(newAcc);
   return newAcc;
 };
 
@@ -2489,6 +2533,7 @@ export const updateSmtpAccount = (id: string, updates: any): SmtpAccount | null 
 
   db.smtpAccounts[idx] = { ...db.smtpAccounts[idx], ...cleanUpdates };
   writeDbFile(db, true);
+  asyncSyncSmtp(db.smtpAccounts[idx]);
   return db.smtpAccounts[idx];
 };
 
@@ -2499,6 +2544,7 @@ export const toggleSmtpAccount = (id: string): SmtpAccount | null => {
   if (idx === -1) return null;
   db.smtpAccounts[idx].is_active = !db.smtpAccounts[idx].is_active;
   writeDbFile(db, true);
+  asyncSyncSmtp(db.smtpAccounts[idx]);
   return db.smtpAccounts[idx];
 };
 
@@ -2509,6 +2555,7 @@ export const deleteSmtpAccount = (id: string): boolean => {
   db.smtpAccounts = db.smtpAccounts.filter(s => s.id !== id);
   if (db.smtpAccounts.length !== before) {
     writeDbFile(db, true);
+    import('./mysqlService.js').then(m => m.deleteSmtpAccountFromMysql(id)).catch(() => {});
     return true;
   }
   return false;

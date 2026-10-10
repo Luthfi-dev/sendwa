@@ -370,10 +370,16 @@ export function WhatsAppConnectPanel({ currentUser, onSessionChange }: WhatsAppC
 
   useEffect(() => {
     fetchSessions();
-    fetchQrCode();
-  }, [fetchSessions, fetchQrCode]);
+  }, [fetchSessions]);
 
-  // QR Countdown Timer auto refresh - only if not already connected
+  // Only start QR socket when user explicitly switches to the QR tab
+  useEffect(() => {
+    if (loginMethod === 'qr') {
+      fetchQrCode();
+    }
+  }, [loginMethod, fetchQrCode]);
+
+  // QR Countdown Timer auto refresh - only if on QR tab and not already connected
   useEffect(() => {
     const isAlreadyConnected = sessions.some(s => s.status === 'connected');
     if (loginMethod !== 'qr' || isAlreadyConnected) return;
